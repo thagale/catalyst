@@ -487,3 +487,5 @@ than a one-size-fits-all solution—take what works, adapt what doesn't!
 Built by [Coalesce Labs](https://github.com/coalesce-labs)
 
 Want to chat about workflows, contribute ideas, or share your fork? Open an issue or discussion!
+
+<!-- diagnostic probe, will be closed -->
