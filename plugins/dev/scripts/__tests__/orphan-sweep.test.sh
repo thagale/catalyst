@@ -1735,26 +1735,36 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ "$axo" == "1" ]]; then
   printf '%s\n' "${WIDEN_PS_ROWS:-}"
-  # Walk to the TOPMOST orphan-sweep.sh ancestor = the sweep's own $$.
-  p="$PPID"; last=""; n=0; chain=""
-  while [[ -n "$p" && "$p" -gt 1 && "$n" -lt 24 ]]; do
-    c="$(/bin/ps -o command= -p "$p" 2>/dev/null)"
-    case "$c" in *orphan-sweep.sh*) last="$p" ;; esac
-    chain="$chain $p"
-    p="$(/bin/ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; n=$((n+1))
-  done
-  if [[ -n "$last" ]]; then
-    printf '%s\n' "$last" > "${SWEEP_SELF_PID_FILE}"
-    printf '%s 1\n' "$last"
-  fi
-  # A FAR ancestor: the topmost non-init pid on the mock's own chain. It is
-  # reachable ONLY by _sweep_self_pids' WALK (the seed covers just $$ and $PPID),
-  # so it is what makes the walk observable.
-  top=""
-  for q in $chain; do top="$q"; done
-  if [[ -n "$top" && "$top" != "$last" ]] && [[ "$top" -gt 1 ]]; then
-    printf '%s\n' "$top" > "${SWEEP_ANCESTOR_PID_FILE}"   # write BEFORE emitting
-    printf '%s 1\n' "$top"
+  # CTL-1531 CI FLAKE (CAT-62 follow-up): this real-ancestor walk (and the rows
+  # it injects) is a race against runner-side pid churn on a busy shared CI box
+  # — see _sweep_enforce_with_ancestor_retry's docblock below for the full
+  # analysis. It is ONLY needed by the self/ancestor-protection tests
+  # (T82/T89/T89b, T100a/T100b), which opt in via WIDEN_ANCESTOR_PROBE=1. Every
+  # OTHER widened-sweep invocation in this file (T84-T99b etc.) has no need to
+  # discover real ancestry at all, so it must not pay for — or be exposed to —
+  # this race. Default off.
+  if [[ "${WIDEN_ANCESTOR_PROBE:-0}" == "1" ]]; then
+    # Walk to the TOPMOST orphan-sweep.sh ancestor = the sweep's own $$.
+    p="$PPID"; last=""; n=0; chain=""
+    while [[ -n "$p" && "$p" -gt 1 && "$n" -lt 24 ]]; do
+      c="$(/bin/ps -o command= -p "$p" 2>/dev/null)"
+      case "$c" in *orphan-sweep.sh*) last="$p" ;; esac
+      chain="$chain $p"
+      p="$(/bin/ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; n=$((n+1))
+    done
+    if [[ -n "$last" ]]; then
+      printf '%s\n' "$last" > "${SWEEP_SELF_PID_FILE}"
+      printf '%s 1\n' "$last"
+    fi
+    # A FAR ancestor: the topmost non-init pid on the mock's own chain. It is
+    # reachable ONLY by _sweep_self_pids' WALK (the seed covers just $$ and $PPID),
+    # so it is what makes the walk observable.
+    top=""
+    for q in $chain; do top="$q"; done
+    if [[ -n "$top" && "$top" != "$last" ]] && [[ "$top" -gt 1 ]]; then
+      printf '%s\n' "$top" > "${SWEEP_ANCESTOR_PID_FILE}"   # write BEFORE emitting
+      printf '%s 1\n' "$top"
+    fi
   fi
   exit 0
 fi
@@ -1885,6 +1895,10 @@ _widen_clear() {
   unset WIDEN_PS_ROWS WIDEN_LEGACY_PIDS WIDEN_FIXTURE_PIDS
   unset SWEEP_PROC_WIDEN_MAX_KILLS SWEEP_PROC_WIDEN_MIN_AGE_SECS SWEEP_PROC_WIDEN_GRACE_SECS
   unset SWEEP_PROC_CWD_TIMEOUT_SECS
+  # CTL-1531 CI FLAKE (CAT-62 follow-up): default the real-ancestry probe back
+  # off on every reset — only the self/ancestor-protection block explicitly
+  # re-enables it. See the ps mock's WIDEN_ANCESTOR_PROBE gate above.
+  unset WIDEN_ANCESTOR_PROBE
   rm -f "$KILL_LOG" "$SWEEP_SELF_PID_FILE" "$SWEEP_ANCESTOR_PID_FILE"
   rm -f "${WIDEN_MOCK_STATE}"/* 2>/dev/null || true
 }
@@ -1975,6 +1989,7 @@ _sweep_enforce_with_ancestor_retry() {
 }
 
 _widen_fixture
+export WIDEN_ANCESTOR_PROBE=1  # T82/T89/T89b need real self/ancestor discovery
 rm -f "$SCRATCH_OTEL_LOG"
 run "T75: widened sweep (enforce) exits 0" \
   _sweep_enforce_with_ancestor_retry
@@ -2608,6 +2623,7 @@ run "T88: legacy branch is unaffected by SWEEP_PROC_WIDEN=off" \
 # otherwise it is signalled twice and emits two reclaim events for one process.
 _widen_fixture
 export WIDEN_LEGACY_PIDS="2001"
+export WIDEN_ANCESTOR_PROBE=1  # T100a/T100b exercise ancestor protection too
 rm -f "$SCRATCH_OTEL_LOG"
 # See the CTL-1531 CI FLAKE note above _sweep_enforce_with_ancestor_retry's
 # definition — same snapshot-staleness race applies here (this sweep run also
