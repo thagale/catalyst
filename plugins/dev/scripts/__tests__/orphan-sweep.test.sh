@@ -1971,6 +1971,13 @@ run "T83: widened kill emits the distinct orphan_proc otel vector" \
 
 # ── CTL-1531 review #6: gates that shipped with ZERO coverage ────────────────
 
+run "DIAG (temporary, CAT-62 follow-up): dump ancestor-walk state" \
+  bash -c 'echo "ANCESTOR_FILE=${SWEEP_ANCESTOR_PID_FILE} exists=$([ -s "${SWEEP_ANCESTOR_PID_FILE}" ] && echo yes || echo no) content=$(cat "${SWEEP_ANCESTOR_PID_FILE}" 2>/dev/null)"; \
+    echo "SELF_FILE=${SWEEP_SELF_PID_FILE} content=$(cat "${SWEEP_SELF_PID_FILE}" 2>/dev/null)"; \
+    echo "KILL_LOG=${KILL_LOG}:"; cat "${KILL_LOG}" 2>/dev/null; \
+    echo "grep-match: $(grep -w "$(cat "${SWEEP_ANCESTOR_PID_FILE}" 2>/dev/null)" "${KILL_LOG}" 2>/dev/null)"; \
+    false'
+
 run "T89: ANCESTOR WALK — a FAR ancestor is spared (walk-only; the seed covers only \$\$ and \$PPID)" \
   bash -c 'test -s "${SWEEP_ANCESTOR_PID_FILE}" \
     && test "$(cat "${SWEEP_ANCESTOR_PID_FILE}")" != "$(cat "${SWEEP_SELF_PID_FILE}")" \
