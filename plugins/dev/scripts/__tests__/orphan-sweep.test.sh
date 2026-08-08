@@ -1939,8 +1939,13 @@ _widen_fixture() {
 
 _widen_fixture
 rm -f "$SCRATCH_OTEL_LOG"
+export CAT62_DIAG_TRACE="${SCRATCH}/cat62-diag-trace.log"
+rm -f "$CAT62_DIAG_TRACE"
 run "T75: widened sweep (enforce) exits 0" \
-  bash -c "SWEEP_PROC_WIDEN=enforce bash '$SWEEP'"
+  bash -c "SWEEP_PROC_WIDEN=enforce CAT62_DIAG_TRACE='$CAT62_DIAG_TRACE' bash '$SWEEP'"
+
+run "DIAG (temporary, CAT-62 follow-up): dump self/ancestor walk trace" \
+  bash -c 'echo "--- trace ---"; cat "${CAT62_DIAG_TRACE}" 2>/dev/null; echo "--- end ---"; false'
 
 run "T75a: bare-sh orphan w/ DELETED cwd under wt root IS killed" \
   bash -c "grep -qw '2001' '${KILL_LOG}'"

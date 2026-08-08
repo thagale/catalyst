@@ -619,13 +619,17 @@ _sweep_self_pids() {
   [[ -n "$_SWEEP_SELF_PIDS" ]] && return 0
   local p="$$" n=0 parent
   _SWEEP_SELF_PIDS=" 1 $$ ${PPID:-1} "
+  : "${CAT62_DIAG_TRACE:=}"
+  [[ -n "$CAT62_DIAG_TRACE" ]] && printf 'seed: \$\$=%s PPID=%s\n' "$$" "${PPID:-1}" >> "$CAT62_DIAG_TRACE"
   while [[ "$p" =~ ^[0-9]+$ ]] && [[ "$p" -gt 1 ]] && [[ $n -lt 32 ]]; do
     parent="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ' | head -1)"
+    [[ -n "$CAT62_DIAG_TRACE" ]] && printf 'hop n=%s p=%s -> parent=%q\n' "$n" "$p" "$parent" >> "$CAT62_DIAG_TRACE"
     [[ "$parent" =~ ^[0-9]+$ ]] || break
     _SWEEP_SELF_PIDS="${_SWEEP_SELF_PIDS}${parent} "
     p="$parent"
     n=$((n+1))
   done
+  [[ -n "$CAT62_DIAG_TRACE" ]] && printf 'final _SWEEP_SELF_PIDS=%s\n' "$_SWEEP_SELF_PIDS" >> "$CAT62_DIAG_TRACE"
   return 0
 }
 
