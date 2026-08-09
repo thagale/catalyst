@@ -273,12 +273,15 @@ function dedupeFlagged(invariants) {
   return [...seen];
 }
 
-// makeOwnsFilter — the ONE HRW self-ownership predicate. Hash over the live
-// dispatch roster so board-health and scheduler admission agree. N=1/unbound
-// owns everything; a throwing resolver fails open.
-export function makeOwnsFilter(board) {
+// makeOwnsFilter — the ONE HRW self-ownership predicate. Recovery ownership
+// defaults to the raw roster so an unavailable peer's slice can only fail over
+// through the explicit holistic + stranded/dead-host gate. Dispatch callers opt
+// into the live dispatch roster. N=1/unbound owns everything; failures open.
+export function makeOwnsFilter(board, { scope = "raw" } = {}) {
   const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
-  const roster = board?.dispatchRoster ?? board?.roster ?? [];
+  const roster = scope === "dispatch"
+    ? (board?.dispatchRoster ?? board?.roster ?? [])
+    : (board?.roster ?? []);
   return (ticket) => {
     if (!multiHost) return true;
     try { return board.ownerForTicket(ticket, roster) === board.self; }
@@ -293,7 +296,9 @@ function ownedTicketsByHost(board) {
   const out = new Map();
   try {
     for (const [id] of board.ticketsById ?? []) {
-      const host = board.ownerForTicket(id, board.roster);
+      // Productivity describes each peer's dispatchable share, so use the same
+      // liveness-filtered roster that dispatch admission uses.
+      const host = board.ownerForTicket(id, board.dispatchRoster ?? board.roster);
       if (!host) continue;
       const ids = out.get(host) ?? [];
       ids.push(id);
@@ -772,7 +777,7 @@ function checkCacheCoherence(b) {
 // + ~no recent dispatch. The single most important silent wedge.
 function checkDispatchLiveness(b, t) {
   const free = b.capacity.freeSlots;
-  const owns = makeOwnsFilter(b);
+  const owns = makeOwnsFilter(b, { scope: "dispatch" });
   const ownedEligible = b.eligible.filter((e) => owns(e.id));
   const queuedTotal = b.eligible.length;
   const queued = ownedEligible.length;
@@ -1009,7 +1014,13 @@ function checkStrandedNode(b) {
 function checkNodeProductivity(b, t) {
   const mode = b?.productivityMode ?? "shadow";
   const roster = Array.isArray(b?.roster) ? b.roster : [];
-  if (roster.length <= 1 || typeof b?.ownerForTicket !== "function" || b?.peerProductivity == null) {
+  const peerProductivity = b?.peerProductivity;
+  const productivityEmpty = peerProductivity instanceof Map
+    ? peerProductivity.size === 0
+    : peerProductivity != null && typeof peerProductivity === "object"
+      ? Object.keys(peerProductivity).length === 0
+      : false;
+  if (roster.length <= 1 || typeof b?.ownerForTicket !== "function" || peerProductivity == null || productivityEmpty) {
     return invariant(true, 0, false, [], "peer productivity unavailable → not observable");
   }
   const owned = ownedTicketsByHost(b);
@@ -2136,7 +2147,7 @@ export function buildUnownedInFlightDetail(boardState, invariants, { thresholds 
 // gets injected into recovery-pass.json (today it gets NONE).
 export function buildBoardContext(boardState, invariants) {
   const githubQuota = quotaForPublication(boardState);
-  const owns = makeOwnsFilter(boardState);
+  const owns = makeOwnsFilter(boardState, { scope: "dispatch" });
   const ownedEligible = boardState.eligible.filter((e) => owns(e.id));
   // CTL-1157: the stuck-worker set is the UNION of the age-flagged workers and the
   // status-based needs-human pile (Workstream B), deduped by ticket.
@@ -2231,6 +2242,7 @@ export function buildBoardContext(boardState, invariants) {
 // chartable attributes); rosters/move arrays stay in details → body.payload.
 export function buildBoardScanEvent({ mode, invariants, decision, act = null, board = null }) {
   const githubQuota = quotaForPublication(board);
+  const owns = board == null ? null : makeOwnsFilter(board, { scope: "dispatch" });
   const totalMoves = decision.proposed.tier1 + decision.proposed.tier2 + decision.proposed.tier3;
   // CTL-1435 (C1): the actuation OUTCOME of this scan. Without it the journal shows
   // proposedMoves but never whether anything was dispatched — the blind spot behind
@@ -2308,7 +2320,7 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       slotCapacity: _slotCap,
       slotInUse,
       slotFree,
-      eligibleOwnedDepth: board == null ? null : board.eligible.filter((e) => makeOwnsFilter(board)(e.id)).length,
+      eligibleOwnedDepth: board == null ? null : board.eligible.filter((e) => owns(e.id)).length,
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
