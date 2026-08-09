@@ -541,6 +541,8 @@ jobs:
             dispatch-usage-limit-fallback.test.mjs \
             account-quota.test.mjs \
             recovery-usage-limit-park.test.mjs \
+            branch-salvage.test.mjs \
+            unowned-pr-verify.test.mjs \
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             boot-resume-approval.test.mjs \
