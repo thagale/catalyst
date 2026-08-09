@@ -92,9 +92,27 @@ function mkPrStatusMap(rows = []) {
 
 // A complete, default-healthy boardState shape (the frozen output assembleBoardState
 // produces). Overrides are shallow-merged per top-level key.
+//
+// CTL-1552: `sanctionedNeedsHuman` (the retired per-host env-var latch) is kept as a
+// test-only convenience — mkBoard translates each listed ticket into the real,
+// current suppression mechanism (a `parked-by-human` label on its ticketsById
+// descriptor) so every pre-CTL-1552 caller of this option keeps working unchanged.
 function mkBoard(o = {}) {
+  // Passthrough when there's nothing to merge in — preserves callers that hand
+  // mkBoard a deliberately-throwing ticketsById fixture (fail-open tests).
+  let ticketsById = o.ticketsById ?? new Map();
+  if ((o.sanctionedNeedsHuman ?? []).length > 0) {
+    ticketsById = new Map(ticketsById);
+    for (const t of o.sanctionedNeedsHuman) {
+      const existing = ticketsById.get(t) ?? {};
+      const labels = Array.isArray(existing.labels) ? existing.labels : [];
+      if (!labels.some((l) => String(l?.name ?? l).toLowerCase() === "parked-by-human")) {
+        ticketsById.set(t, { ...existing, labels: [...labels, { name: "parked-by-human" }] });
+      }
+    }
+  }
   return {
-    ticketsById: o.ticketsById ?? new Map(),
+    ticketsById,
     signals: o.signals ?? [],
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
@@ -701,14 +719,17 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   });
 
   test("Gate 3: failures + free slots + account usage cliff → skip/account-usage-cliff", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), accountUsageHeadroom: inv(false, 1, true, ["account-usage"]) };
+    // CAT-76: dispatchLiveness's own move is ticket-less (not anchorable), so it
+    // can no longer serve as Gate 1's actionable-work filler — use a real
+    // ticket-bearing failure instead so Gate 1 passes and Gate 3 is reached.
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-FILLER"]), accountUsageHeadroom: inv(false, 1, true, ["account-usage"]) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("skip");
     expect(d.gate.reason).toBe("account-usage-cliff");
   });
 
   test("Gate 3: an unobservable account usage invariant does not gate", () => {
-    const invs = { ...allGreen(), dispatchLiveness: inv(false, 1), accountUsageHeadroom: inv(false, 1, false) };
+    const invs = { ...allGreen(), needsHumanPile: inv(false, 1, true, ["CTL-FILLER"]), accountUsageHeadroom: inv(false, 1, false) };
     const d = decideBoardHealth(invs, mkBoard({ capacity: { freeSlots: 4 } }));
     expect(d.gate.decision).toBe("proceed");
   });
@@ -716,7 +737,7 @@ describe("decideBoardHealth — ordered gates, first match wins", () => {
   test("Gate 3: the GitHub cliff wins when both quota cliffs are tripped", () => {
     const invs = {
       ...allGreen(),
-      dispatchLiveness: inv(false, 1),
+      needsHumanPile: inv(false, 1, true, ["CTL-FILLER"]),
       rateLimitHeadroom: inv(false, 1),
       accountUsageHeadroom: inv(false, 1),
     };
@@ -2127,7 +2148,8 @@ describe("checkUnownedInFlight (CTL-1475)", () => {
 
   test("an operator-sanctioned ticket is not re-proposed", () => {
     const inv = evaluateInvariants(board({ ticketsById: one() }));
-    const moves = proposeMoves(inv, { sanctionedNeedsHuman: ["CTL-9"] });
+    // CTL-1552: suppression is label-only now — parked-by-human on the descriptor.
+    const moves = proposeMoves(inv, { ticketsById: one({ labels: [{ name: "parked-by-human" }] }) });
     expect(moves.tier2.some((x) => x.move === "recover-unowned-in-flight")).toBe(false);
   });
 
