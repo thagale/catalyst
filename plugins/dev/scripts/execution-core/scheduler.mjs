@@ -589,6 +589,7 @@ function readPositiveLive(
 
 export function computeNotLiveHosts(roster, opts = {}) {
   if (!Array.isArray(roster)) return null;
+  if (roster.length <= 1) return [];
   const { live } = readPositiveLive(roster, opts);
   if (!Array.isArray(live)) return null;
   const liveSet = new Set(live);
@@ -614,9 +615,10 @@ export function computeDispatchSurvivingRoster(roster, opts = {}) {
 // cleanup #1). Composes positive-liveness → restore deflap → outage fail-safe:
 //
 //  1. Read the raw positively-live set once.
-//  2. TOTAL OUTAGE (read threw, or NOBODY positively live) → degrade to the FULL
-//     roster and DO NOT mutate the deflap observation state (we learned nothing
-//     this tick). This preserves the "outage → full roster, never re-home" invariant
+//  2. TOTAL OUTAGE (read threw, or NOBODY positively live) → mark the outage while
+//     preserving the per-host observations and last-known-good roster. Before the
+//     sustained threshold, degrade to the FULL roster. This preserves the
+//     "transient outage → full roster, never re-home" invariant
 //     that a naive deflap-on-fail-open-roster would violate: without this guard a
 //     just-departed host (prevState liveSince:null) would be held out and its slice
 //     re-homed to a peer during an outage (CTL-1091 correctness review #1).
@@ -7008,6 +7010,19 @@ export function schedulerTick(
     for (const anomaly of eligibleGraph.anomalies) {
       for (const member of anomaly.members) {
         if (eligibleIds.has(member)) {
+          // HRW ownership gate. This sweep runs over `eligible` — the RAW,
+          // un-owned pool — and above the ready-filter that applies ownership to
+          // dispatch, so without this gate EVERY host in the cluster escalates
+          // EVERY cycle member. An unstarted eligible ticket has no worker dir and
+          // no claim generation, so fenceGuard's escalation fail-open passes on all
+          // of them, and labelOnce's marker is host-local: N hosts → N Linear label
+          // writes and N worker.transition events for one ticket. Unlike actual
+          // dispatch, this pre-claim external write has no cluster-claim CAS to
+          // serialize hosts. Use the stable configured roster here: sustained
+          // outage fallback state is host-local and may diverge, so it is not a
+          // safe ownership authority for non-claim-gated side effects.
+          // STRICT no-op at N=1.
+          if (multiHost && !ownedBy(member, roster, self)) continue;
           log.warn(
             { member, members: anomaly.members },
             "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human"
