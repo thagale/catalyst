@@ -1516,6 +1516,10 @@ function eligibleDeferredAnchors(board) {
 export function decideBoardHealth(invariants, boardState) {
   const observableFailed = Object.values(invariants).filter((v) => v.observable && !v.ok);
   const invariantsFailed = observableFailed.reduce((n, v) => n + (Number(v.failed) || 0), 0);
+  // CAT-58: threaded through to `decision()` so the emitted scan carries which
+  // needs-human latches were sanctioned (operator-allowlisted), same source as
+  // eligibleDeferredAnchors/selectAnchorCandidates above.
+  const sanctioned = new Set(boardState?.sanctionedNeedsHuman ?? []);
 
   // CTL-1432 (B2/B3 — Codex P1): gate on ACTIONABLE work, not merely a failed
   // invariant. proposeMoves already suppresses the sanctioned needs-human latches
