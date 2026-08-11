@@ -625,6 +625,7 @@ export function defaultAppendFenceSuppressedEvent({ ticket, site, host, reason =
   return defaultAppendOperatorEvent({
     "event.name": "escalation.fence-suppressed",
     payload: { ticket, site, host, reason },
+    attributes: { ticket, site, host, reason },
   });
 }
 
@@ -1469,6 +1470,7 @@ export function defaultAppendOperatorEvent(evt) {
         resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
         attributes: {
           "event.name": name,
+          ...(evt?.attributes ?? {}),
         },
         body: { payload: evt?.payload ?? null },
       }) + "\n";
