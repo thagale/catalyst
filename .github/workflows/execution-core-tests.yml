@@ -646,6 +646,7 @@ jobs:
             cli/beliefs-shadow-status.test.mjs \
             beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
+            cli/branches.test.mjs \
             abort-worker.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
