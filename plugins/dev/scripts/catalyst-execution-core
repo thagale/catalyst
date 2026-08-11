@@ -35,7 +35,7 @@ source "$SCRIPT_DIR/lib/catalyst-agent-path.sh"
 
 DAEMON_SCRIPT="${EXECUTION_CORE_DAEMON_SCRIPT:-$SCRIPT_DIR/execution-core/daemon.mjs}"
 RUNTIME="${EXECUTION_CORE_RUNTIME-}" # empty → resolve_runtime picks bun/node
-EXECUTION_CORE_PROC_PATTERN="${EXECUTION_CORE_PROC_PATTERN:-$DAEMON_SCRIPT}"
+EXECUTION_CORE_PROC_PATTERN="${EXECUTION_CORE_PROC_PATTERN:-execution-core/daemon.mjs}"
 # shellcheck source=lib/process-identity.sh
 source "${CATALYST_PROCESS_IDENTITY_LIB:-$SCRIPT_DIR/lib/process-identity.sh}"
 

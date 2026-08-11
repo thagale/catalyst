@@ -31,6 +31,22 @@ ok jq -e 'select(.attributes["event.name"] == "node.stack.start-suppressed") | .
 : > "$TMP/calls"; ok "$STACK" start; ok test ! -e "$CATALYST_DIR/stack-halt.json"; ok test -s "$TMP/calls"
 ok bash -c "'$STACK' status 2>&1 | grep -q supervision"
 ok "$STACK" stop; ok "$STACK" restart; ok test ! -e "$CATALYST_DIR/stack-halt.json"
+# Malformed haltedAt must self-heal, not abort the calling shell. A float reaching
+# $((now - halted)) is a fatal bash arithmetic error that kills `status` outright.
+for bad in 1.5 notanumber '"2026-01-01"'; do
+  printf '{"haltedAt":%s,"host":"h","reason":"r","by":"u","ttlSecs":86400}\n' "$bad" \
+    > "$CATALYST_DIR/stack-halt.json"
+  ok bash -c "'$STACK' status >/dev/null 2>&1"
+  ok test ! -e "$CATALYST_DIR/stack-halt.json"
+  rm -f "$CATALYST_DIR"/stack-halt.json.invalid.*
+done
+# A future-dated marker must expire (malformed), never pin age at 0 and strand the host.
+printf '{"haltedAt":99999999999,"host":"h","reason":"r","by":"u","ttlSecs":86400}\n' \
+  > "$CATALYST_DIR/stack-halt.json"
+: > "$TMP/calls"; ok "$STACK" start --supervised; ok test -s "$TMP/calls"
+ok test ! -e "$CATALYST_DIR/stack-halt.json"
+rm -f "$CATALYST_DIR"/stack-halt.json.invalid.*
+
 BAKE_ROOT="$ROOT"
 GIT_DIR="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || true)"
 if [[ "$GIT_DIR" == */worktrees/* ]]; then

@@ -942,10 +942,10 @@ _emit_checkout_updated() {
 
 _stack_service_running() {
   case "$1" in
-    monitor) catalyst-monitor status 2>&1 | grep -q '^running' ;;
-    broker) catalyst-broker status 2>&1 | grep -q '^running' ;;
-    execution-core) catalyst-execution-core status 2>&1 | grep -q '^running' ;;
-    otel-forward) catalyst-monitor forward-status 2>&1 | grep -q '^running' ;;
+    monitor) catalyst-monitor status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    broker) catalyst-broker status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    execution-core) catalyst-execution-core status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
+    otel-forward) catalyst-monitor forward-status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' ;;
     *) return 1 ;;
   esac
 }
@@ -1233,10 +1233,10 @@ cmd_start() {
   fi
 
   if [[ "$supervised" == "yes" ]]; then
-    [[ "$node_class" != "developer" ]] && ! catalyst-monitor status 2>&1 | grep -q '^running' && down_before="monitor"
-    [[ "$node_class" != "developer" ]] && ! catalyst-broker status 2>&1 | grep -q '^running' && down_before="${down_before:+$down_before,}broker"
-    [[ "$node_class" == "worker" ]] && ! catalyst-execution-core status 2>&1 | grep -q '^running' && down_before="${down_before:+$down_before,}execution-core"
-    [[ "$node_class" != "developer" ]] && ! catalyst-monitor forward-status 2>&1 | grep -q '^running' && down_before="${down_before:+$down_before,}otel-forward"
+    [[ "$node_class" != "developer" ]] && ! catalyst-monitor status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="monitor"
+    [[ "$node_class" != "developer" ]] && ! catalyst-broker status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="${down_before:+$down_before,}broker"
+    [[ "$node_class" == "worker" ]] && ! catalyst-execution-core status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="${down_before:+$down_before,}execution-core"
+    [[ "$node_class" != "developer" ]] && ! catalyst-monitor forward-status 2>&1 | grep -qiE '(^|[[:space:]])running \(pid' && down_before="${down_before:+$down_before,}otel-forward"
   fi
 
   # CTL-1084: known-good start order is monitor → broker → execution-core
@@ -1388,7 +1388,11 @@ latest_boot_event() {
 cmd_status() {
   echo "  supervision      $(stack_halt_describe)"
   if command -v launchctl >/dev/null 2>&1 && launchctl list 2>/dev/null | grep -q "$STACK_AGENT_LABEL"; then
-    echo "  stack agent      loaded (${STACK_AGENT_LABEL}, --supervised: yes)"
+    if grep -q -- '<string>--supervised</string>' "$STACK_AGENT_PLIST" 2>/dev/null; then
+      echo "  stack agent      loaded (${STACK_AGENT_LABEL}, --supervised: yes)"
+    else
+      echo "  stack agent      loaded (${STACK_AGENT_LABEL}, --supervised: NO — stale agent, operator stops will be undone; run 'catalyst-stack install-services')"
+    fi
   else
     echo "  stack agent      not loaded (${STACK_AGENT_LABEL})"
   fi
@@ -3517,7 +3521,7 @@ _vn_resolve() {
 _vn_broker_running()    { if _broker_running; then echo yes; else echo no; fi; }
 _vn_exec_core_running() {
   if command -v catalyst-execution-core >/dev/null 2>&1 \
-     && catalyst-execution-core status 2>/dev/null | grep -q '^running'; then echo yes; else echo no; fi
+     && catalyst-execution-core status 2>/dev/null | grep -qiE '(^|[[:space:]])running \(pid'; then echo yes; else echo no; fi
 }
 _vn_monitor_running() {
   if command -v catalyst-monitor >/dev/null 2>&1 \
