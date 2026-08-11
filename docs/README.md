@@ -11,3 +11,4 @@ Reference documentation for Catalyst contributors. User-facing docs live at
 - [ADRs](./adrs.md) — Architecture decision records
 - [Frontmatter Standard](./frontmatter-standard.md) — Skills and agent frontmatter format
 - [Releases](./releases.md) — Release Please workflow, version management
+- [GitHub Actions token cascades](./github-actions-token-cascade.md) — Why bot-authenticated merges suppress downstream CI and how to verify the fix

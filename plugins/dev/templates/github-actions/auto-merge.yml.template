@@ -1,0 +1,30 @@
+name: Auto-Merge PRs
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          # CAT-151: GITHUB_TOKEN merges do not start downstream workflows.
+          AUTOMERGE_PAT: ${{ secrets.{{SECRET_NAME}} }}
+          FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${AUTOMERGE_PAT}" ]; then
+            export GH_TOKEN="${AUTOMERGE_PAT}"
+          else
+            echo "::warning title=Auto-merge cascade suppressed::{{SECRET_NAME}} is not available to this run; merging with GITHUB_TOKEN. Downstream push / workflow_run pipelines will NOT fire (CAT-151)."
+            export GH_TOKEN="${FALLBACK_TOKEN}"
+          fi
+          gh pr merge "$PR_URL" --auto --squash
