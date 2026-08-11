@@ -8,7 +8,8 @@ jobs:
   merge:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    run: gh pr merge "$PR_URL" --auto --squash
+    run: |
+      gh pr merge "$PR_URL" --auto --squash
 EOF
 cat >"$S/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -33,5 +34,7 @@ git init -q --bare -b main "$S/origin.git"; git -C "$S/source" remote add origin
 GH_FIXTURE_DIR="$S/f" GH_CALLS="$S/calls" GH_CLONE_URL="$S/origin.git" CATALYST_AUTOMERGE_GH_BIN="$S/gh" "$SUT" --rollout --fix --repos "$S/repos.json" >"$S/fix-out"
 grep -qF 'org/repo: opened' "$S/fix-out" || exit 1
 [[ "$(grep -c '^pr create' "$S/calls")" -eq 1 ]] || exit 1
-git --git-dir="$S/origin.git" show catalyst/cat-151-automerge-cascade:.github/workflows/auto-merge.yml | grep -qF 'AUTOMERGE_PAT:' || exit 1
-echo '5 passed, 0 failed'
+git --git-dir="$S/origin.git" show catalyst/cat-151-automerge-cascade:.github/workflows/auto-merge.yml >"$S/patched.yml"
+grep -qF 'AUTOMERGE_PAT:' "$S/patched.yml" || exit 1
+ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$S/patched.yml" || exit 1
+echo '6 passed, 0 failed'

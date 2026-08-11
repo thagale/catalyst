@@ -59,6 +59,7 @@ on:
       # directory and the guard never runs — which is how otel-forward/lib/dlq.ts's
       # three unbounded reads sat unnoticed in a long-lived daemon.
       - "plugins/dev/scripts/**"
+      - "plugins/dev/templates/github-actions/**"
       # NOTE: the glob above SUBSUMES every plugins/dev/scripts path listed below.
       # They are retained as documentation of WHICH STEP each path feeds, not as
       # triggers — do not read the list as the trigger set.
@@ -127,6 +128,7 @@ jobs:
               - "plugins/dev/scripts/execution-core/**"
               - "plugins/dev/scripts/broker/**"
               - "plugins/dev/scripts/**"
+              - "plugins/dev/templates/github-actions/**"
               - "plugins/dev/scripts/catalyst-install"
               - "plugins/dev/scripts/catalyst"
               - "plugins/dev/scripts/catalyst-linear"
@@ -323,6 +325,14 @@ jobs:
         # that brings the stack launch path to parity with the launchd wrapper.
         working-directory: plugins/dev/scripts
         run: bash __tests__/catalyst-monitor-dist-redirect.test.sh
+
+      - name: Auto-merge cascade audit tests (CAT-151)
+        working-directory: plugins/dev/scripts
+        run: |
+          bash __tests__/audit-automerge-cascade.test.sh
+          bash __tests__/audit-automerge-cascade-verify.test.sh
+          bash __tests__/audit-automerge-cascade-rollout.test.sh
+          bash __tests__/automerge-template-patch.test.sh
 
       - name: liveness-anchor cross-stack parity test (CTL-1612 round 6/7)
         # Pins catalyst-monitor.sh's resolve_liveness_anchor_issue() (a bash mirror of

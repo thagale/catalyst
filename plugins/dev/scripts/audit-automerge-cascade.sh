@@ -5,7 +5,7 @@
 set -uo pipefail
 
 GH="${CATALYST_AUTOMERGE_GH_BIN:-gh}"
-MODE=audit REPOS_FILE="${AUTOMERGE_CASCADE_REPOS:-}" ORG="" JSON=0 FIX=0
+MODE=audit REPOS_FILE="${AUTOMERGE_CASCADE_REPOS:-}" ORG="" JSON=0 FIX=0 PATCH_WRITE=1
 SINCE="" SECRET_NAME=AUTOMERGE_PAT LIMIT=0 PATCH_FILE=""
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${SCRIPT_DIR}/../templates/github-actions/auto-merge.yml.template"
@@ -33,8 +33,8 @@ while [[ $# -gt 0 ]]; do
 	--limit) [[ $# -gt 1 ]] || die "--limit needs a number"; LIMIT="$2"; shift ;;
 	--patch-workflow) [[ $# -gt 1 ]] || die "--patch-workflow needs a file"; PATCH_FILE="$2"; shift ;;
 	--json) JSON=1 ;;
-	--fix) FIX=1 ;;
-	--dry-run) FIX=0 ;;
+	--fix) FIX=1; PATCH_WRITE=1 ;;
+	--dry-run) FIX=0; PATCH_WRITE=0 ;;
 	-h|--help) usage; exit 0 ;;
 	*) die "unknown argument '$1'" ;;
 	esac
@@ -60,6 +60,11 @@ patch_workflow() {
 		echo already-current
 		return 0
 	fi
+	# The patcher preserves repository-specific workflow policy and only expands
+	# an existing block-scalar merge command. Rewriting inline YAML safely would
+	# require a YAML-aware editor; fail closed instead of emitting invalid YAML.
+	grep -qE '^[[:space:]]*run:[[:space:]]+.*gh[[:space:]]+pr[[:space:]]+merge' "$file" && { echo refused; return 3; }
+	grep -qE 'GH_TOKEN:[[:space:]]*\$\{\{[[:space:]]*secrets\.GITHUB_TOKEN[[:space:]]*\}\}' "$file" || { echo refused; return 3; }
 	tmp="$(mktemp "${TMPDIR:-/tmp}/automerge-template.XXXXXX")" || return 3
 	# Modify only the merge step. Repository-specific triggers, authorization
 	# gates, dependencies, permissions, and adjacent steps are security policy.
@@ -86,7 +91,7 @@ patch_workflow() {
 		{print}
 	' "$file" >"$tmp"
 	if cmp -s "$file" "$tmp"; then rm -f "$tmp"; echo already-current; return 0; fi
-	if [[ $FIX -eq 1 || -n "$PATCH_FILE" ]]; then mv "$tmp" "$file"; echo patched; else diff -u "$file" "$tmp" || true; rm -f "$tmp"; echo would-patch; fi
+	if [[ $FIX -eq 1 || ( -n "$PATCH_FILE" && $PATCH_WRITE -eq 1 ) ]]; then mv "$tmp" "$file"; echo patched; else diff -u "$file" "$tmp" || true; rm -f "$tmp"; echo would-patch; fi
 }
 
 if [[ -n "$PATCH_FILE" ]]; then
