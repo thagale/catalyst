@@ -168,6 +168,8 @@ while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
 SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
 unset _SRC
 
+# shellcheck source=lib/stack-halt.sh
+source "$SCRIPT_DIR/lib/stack-halt.sh"
 # shellcheck source=lib/cloud-sync-token-probe.sh
 [[ -f "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh" ]] && . "${SCRIPT_DIR}/lib/cloud-sync-token-probe.sh"
 # shellcheck source=lib/catalyst-agent-path.sh
@@ -1158,6 +1160,7 @@ cmd_sync_cloud_env() {
 cmd_start() {
   local use_proxy="no"
   local hotpatch="no"
+  local supervised="no"
   ASSUME_YES="${ASSUME_YES:-no}"
   for arg in "$@"; do
     case "$arg" in
@@ -1165,6 +1168,7 @@ cmd_start() {
       --no-proxy) : ;;
       --hotpatch) hotpatch="yes" ;;
       --yes)      ASSUME_YES="yes" ;;
+      --supervised) supervised="yes" ;;
       *) fail "unknown arg: $arg" ;;
     esac
   done
@@ -1193,6 +1197,21 @@ cmd_start() {
   # here would immediately fail that node's own `verify-node broker-stopped` check
   # (Codex P2 "keep developer starts daemonless").
   local node_class; node_class="$(_resolve_node_class)"
+
+  if [[ "$supervised" == "yes" ]]; then
+    if stack_halt_active; then
+      log "stack start suppressed by active halt marker (${STACK_HALT_FILE}); run 'catalyst-stack start' to clear it"
+      return 0
+    fi
+    if [[ "$STACK_HALT_STATE" == "expired" ]]; then
+      log "halt marker EXPIRED after ${STACK_HALT_AGE_SECS}s — resuming"
+      stack_halt_clear
+    elif [[ "$STACK_HALT_STATE" == "malformed" ]]; then
+      warn "malformed halt marker renamed aside — resuming"
+    fi
+  else
+    stack_halt_clear
+  fi
 
   # CTL-1084: known-good start order is monitor → broker → execution-core
   # (encoded here instead of operator memory; daemon always last).
@@ -1261,6 +1280,11 @@ cmd_start() {
 }
 
 cmd_stop() {
+  local halt="yes"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --halt) halt="yes" ;; --no-halt) halt="no" ;; *) fail "unknown stop arg: $1 (try: --no-halt)" ;; esac
+    shift
+  done
   # Reverse of start order: the shipper started last, so stop it first.
   stop_shipper
   # CTL-1654: stop event-mirror on observation nodes; idempotent no-op on workers.
@@ -1278,12 +1302,14 @@ cmd_stop() {
   stop_monitor
   stop_broker
   stop_mitmproxy
+  [[ "$halt" == "yes" ]] && stack_halt_write "operator requested stop"
+  return 0
 }
 
 cmd_restart() {
   local hotpatch="no"
   for a in "$@"; do [[ "$a" == "--hotpatch" ]] && hotpatch="yes"; done
-  cmd_stop
+  cmd_stop --no-halt
   if [[ "$hotpatch" == "yes" ]]; then
     cmd_hotpatch
   fi
@@ -1671,6 +1697,7 @@ render_stack_plist() {
     <string>${cmd}</string>
     <string>start</string>
     <string>--yes</string>
+    <string>--supervised</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -4321,7 +4348,7 @@ cmd_claude_account() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
 case "${1:-}" in
   start)    shift; cmd_start "$@" ;;
-  stop)     cmd_stop ;;
+  stop)     shift; cmd_stop "$@" ;;
   restart)  shift; cmd_restart "$@" ;;
   hotpatch) shift; cmd_hotpatch "$@" ;;
   parity)   shift; cmd_parity "$@" ;;
