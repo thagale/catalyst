@@ -996,6 +996,36 @@ describe("buildRecoveryEnvelope numeric/enum promotion (CTL-1291)", () => {
     expect(a.cohort_stranded_held).toBe(5);
   });
 
+  // CAT-82 (Codex P1): the triage-production scalars are the ONLY useful evidence
+  // in the default shadow rollout — triageProduction.failed is pinned to 0 there
+  // by design — and the forwarder drops body.payload off-host, so leaving them
+  // unpromoted made the rollout unvalidatable in Loki/Grafana.
+  test("recovery.board-scan promotes the triage-production scalars", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0,
+      gateDecision: "skip", gateReason: "no-actionable-moves",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 1,
+      invariants: { triageProduction: { ok: false, failed: 0 } },
+      triageUntriagedEligible: 12,
+      triageLastCompleteAgeMs: 3_600_000,
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.triage.untriaged_eligible"]).toBe(12);
+    expect(a["recovery.triage.last_complete_age_ms"]).toBe(3_600_000);
+  });
+
+  test("recovery.board-scan omits the triage scalars when unobservable (never a fake zero)", () => {
+    const details = {
+      mode: "shadow", invariantsFailed: 0, gateDecision: "skip", gateReason: "r",
+      proposedTier1: 0, proposedTier2: 0, proposedTier3: 0, invariants: {},
+      triageUntriagedEligible: 0,
+      triageLastCompleteAgeMs: null, // no completion in the bounded tail
+    };
+    const a = buildRecoveryEnvelope({ type: "recovery.board-scan", ticket: null, details }).attributes;
+    expect(a["recovery.triage.untriaged_eligible"]).toBe(0);
+    expect("recovery.triage.last_complete_age_ms" in a).toBe(false);
+  });
+
   // CTL-1607: per-host slot census promoted to chartable recovery.slot.* attributes.
   test("recovery.board-scan promotes slot* scalars under recovery.slot.* names", () => {
     const details = {

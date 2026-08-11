@@ -91,10 +91,11 @@ import {
   isAssigneeClaimable,
   isClaimable,
   readTicketLabels as defaultReadTicketLabels,
+  runTriageStateQuery, // CAT-82: replica-only Triage-state read for board-health producer parity
   GATEWAY_EXISTS_FRESH_MS,
 } from "./linear-query.mjs";
 import { gatewayLabelsHit, descriptorAgeMs } from "./gateway-read.mjs"; // CTL-1079 / CTL-1570
-import { getProjectConfig, listProjects, ownerRepoFromRepoRoot } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup
+import { getProjectConfig, listProjects, ownerRepoFromRepoRoot, resolveEligibleQuery } from "./registry.mjs"; // CTL-1157: ownerRepoFromRepoRoot reconciles registry repoRoot → GitHub owner/repo for board-health's composite (repo,number) PR-status lookup; CAT-82: resolveEligibleQuery supplies the per-team Triage-state query
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
 // The gatedTeardownWorktree import is removed; the teardown phase agent
@@ -6276,6 +6277,52 @@ export function schedulerTick(
           // existsSync/join are already imported in scheduler.mjs.
           hasTriageArtifact: (ticket) =>
             existsSync(join(orchDir, "workers", ticket, "triage.json")),
+          // CAT-82 (Codex P1): give board-health the SAME candidate set the producer
+          // sweeps. sweepMissingTriage walks `Triage-state board ∪ eligible set`, but
+          // `eligible` above is a Todo-only projection — so a missing-artifact ticket
+          // already sitting in the Triage state was invisible to the invariant, and
+          // with no coexisting Todo candidate it reported healthy while that ticket
+          // was held every sweep. This is the Triage half. It is REPLICA-ONLY
+          // (runTriageStateQuery returns [] without a replica and never calls the
+          // API), and assembleBoardState invokes it lazily behind board-health's
+          // 5-minute throttle and only when the invariant is enabled — so an
+          // unconfigured or disabled install pays nothing.
+          getTriageStateCandidates: _boardHealth.getTriageStateCandidates ??
+            (() => {
+              const out = [];
+              let projects = [];
+              try {
+                projects = listProjects();
+              } catch {
+                return out;
+              }
+              for (const p of projects) {
+                try {
+                  const query = resolveEligibleQuery(p);
+                  if (!query?.triageStatus) continue;
+                  for (const t of runTriageStateQuery(query, { replica })) out.push(t);
+                } catch {
+                  // Fail open: an unreadable Triage board degrades to the eligible
+                  // half alone (the pre-CAT-82 behavior), never to a false starvation.
+                }
+              }
+              return out;
+            }),
+          // CAT-82 (Codex P2): apply the producer's own claimability rule.
+          // dispatchTriage returns WITHOUT producing a triage.json for a ticket
+          // delegated to another actor, so that is not work this producer can
+          // advance — counting it as untriaged reports deliberately external work as
+          // stalled Catalyst triage production. A null delegate is still OURS: the
+          // producer claims it by delegating to the orchestrator on the next sweep.
+          // An empty/absent botUserIds disables the gate in dispatchTriage, so it
+          // disables this filter too (CTL-749 fail-open convention).
+          isTriageClaimable: _boardHealth.isTriageClaimable ??
+            ((row) => {
+              if (!(botUserIds instanceof Set) || botUserIds.size === 0) return true;
+              const delegate = row?.delegate ?? null;
+              if (delegate == null) return true;
+              return isClaimable(null, delegate, botUserIds);
+            }),
         });
         if (_bhResult?.ran) _boardHealthLastRunMs = _bhResult.ranAtMs;
         // CTL-1157 (Codex round-5): a successful board-health ENFORCE dispatch enqueued

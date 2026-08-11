@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   getTriageSweepHealthDir,
   TRIAGE_SWEEP_HELD_ALERT_THRESHOLD,
+  TRIAGE_SWEEP_HELD_REFRESH_MS,
   log,
 } from "./config.mjs";
 import {
@@ -26,6 +27,15 @@ function defaultReadMarker(team) {
     return {
       consecutiveHeld: typeof parsed.consecutiveHeld === "number" ? parsed.consecutiveHeld : 0,
       alerting: parsed.alerting === true,
+      // CAT-82 (Codex P1): hydrate the last held-emit stamp so a daemon restart
+      // mid-outage does not reset the refresh clock (which would re-emit
+      // immediately on the first post-restart sweep, then again a full interval
+      // later). A marker written before this field existed hydrates as null and
+      // refreshes on the next held sweep — the fail-safe direction.
+      lastHeldEmitMs:
+        typeof parsed.lastHeldEmitMs === "number" && Number.isFinite(parsed.lastHeldEmitMs)
+          ? parsed.lastHeldEmitMs
+          : null,
     };
   } catch {
     return null;
@@ -35,7 +45,7 @@ function defaultReadMarker(team) {
 function ensureEntry(team, readMarker) {
   let entry = health.get(team);
   if (!entry) {
-    entry = readMarker(team) ?? { consecutiveHeld: 0, alerting: false };
+    entry = readMarker(team) ?? { consecutiveHeld: 0, alerting: false, lastHeldEmitMs: null };
     health.set(team, entry);
   }
   return entry;
@@ -55,6 +65,8 @@ export function recordTriageSweep(team, { considered = 0, heldDelegateUnreadable
   readMarker = defaultReadMarker,
   writeMarker = defaultWriteMarker,
   threshold = TRIAGE_SWEEP_HELD_ALERT_THRESHOLD,
+  refreshMs = TRIAGE_SWEEP_HELD_REFRESH_MS,
+  now = () => Date.now(),
 } = {}) {
   try {
     const entry = ensureEntry(team, readMarker);
@@ -69,15 +81,33 @@ export function recordTriageSweep(team, { considered = 0, heldDelegateUnreadable
     const fullyHeld = heldDelegateUnreadable === considered;
     if (fullyHeld) {
       entry.consecutiveHeld += 1;
-      if (entry.consecutiveHeld >= threshold && !entry.alerting) {
+      // CAT-82 (Codex P1): emit on the rising edge AND refresh periodically while
+      // the latch stays held. The durable marker below survives anything, but
+      // board-health's corroboration is rebuilt from the BOUNDED event tail (the
+      // current month's last 800 events), so an edge-only emit goes dark the moment
+      // that single event is evicted — or instantly at a UTC month rollover, which
+      // starts an empty file. With no completion in the new tail either,
+      // checkTriageProduction then reports observable:false and stops escalating a
+      // still-running outage. Re-emitting keeps the evidence inside the window.
+      const nowMs = now();
+      const stale = entry.lastHeldEmitMs == null || nowMs - entry.lastHeldEmitMs >= refreshMs;
+      if (entry.consecutiveHeld >= threshold && (!entry.alerting || stale)) {
         const appended = appendEvent({ team, action: TRIAGE_HELD_ACTION, consecutiveHeld: entry.consecutiveHeld, considered, heldDelegateUnreadable });
-        if (appended !== false) entry.alerting = true;
+        // A failed append must not advance the refresh clock — otherwise a transient
+        // write error would suppress re-emission for a whole interval.
+        if (appended !== false) {
+          entry.alerting = true;
+          entry.lastHeldEmitMs = nowMs;
+        }
       }
     } else {
       entry.consecutiveHeld = 0;
       if (entry.alerting) {
         const appended = appendEvent({ team, action: TRIAGE_RECOVERED_ACTION, consecutiveHeld: 0, considered, heldDelegateUnreadable });
-        if (appended !== false) entry.alerting = false;
+        if (appended !== false) {
+          entry.alerting = false;
+          entry.lastHeldEmitMs = null;
+        }
       }
     }
     writeMarker(team, entry);

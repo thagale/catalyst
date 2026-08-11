@@ -1309,6 +1309,18 @@ export const REPLICA_DEGRADED_ALERT_THRESHOLD =
 export const TRIAGE_SWEEP_HELD_ALERT_THRESHOLD =
   Number(process.env.EXECUTION_CORE_TRIAGE_SWEEP_HELD_THRESHOLD) || 3;
 
+// CAT-82 (Codex P1): how often a STILL-held sweep re-emits its held event while
+// the latch is already alerting. The latch alone is durable, but board-health's
+// corroboration (`ring.triageSweepHeld`) is reconstructed from the bounded event
+// tail — the current month's last 800 events. A single held edge is evicted once
+// the fleet is busy, and a UTC month rollover starts an empty file, so an
+// edge-only emit left `checkTriageProduction` with no completion AND no held
+// evidence: observable:false, escalation silently stops mid-outage. Re-emitting
+// on this cadence keeps the evidence inside the window for as long as the outage
+// lasts, at a bounded ~4 events/hour/team.
+export const TRIAGE_SWEEP_HELD_REFRESH_MS =
+  Number(process.env.EXECUTION_CORE_TRIAGE_SWEEP_HELD_REFRESH_MS) || 15 * 60_000;
+
 // CAT-29: time-based total-blindness tripwire. This complements the count-based
 // threshold above, whose 10-minute polling cadence can otherwise delay an alarm
 // for 20–30 minutes during a from-boot outage.

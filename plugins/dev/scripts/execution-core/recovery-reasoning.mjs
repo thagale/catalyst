@@ -1526,6 +1526,18 @@ function promoteNumericAttrs(type, details) {
     // rather than charting a fake zero.
     num("recovery.github.core_remaining", details.githubCoreRemaining);
     num("recovery.github.core_remaining_pct", details.githubCoreRemainingPct);
+    // CAT-82 (Codex P1): promote the triage-production scalars. In the default
+    // `shadow` rollout triageProduction.failed is pinned to 0 by design, so the
+    // recovery.inv.triageProduction.failed mirror above carries NO information —
+    // these two are the only evidence the invariant found stalled production. The
+    // forwarder drops body.payload off-host, so leaving them in details makes the
+    // shadow rollout unvalidatable: an operator sees the scan fire but cannot chart
+    // the untriaged count or the completion age it observed. Both are bounded (a
+    // candidate count and an age in ms); the flagged ticket list and sweep-held team
+    // roster stay in body.payload (cardinality). `num` drops nulls, so an
+    // unobservable scan promotes nothing rather than charting a fake zero.
+    num("recovery.triage.untriaged_eligible", details.triageUntriagedEligible);
+    num("recovery.triage.last_complete_age_ms", details.triageLastCompleteAgeMs);
   }
   return a;
 }

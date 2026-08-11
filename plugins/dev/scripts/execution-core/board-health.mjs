@@ -547,6 +547,23 @@ export function assembleBoardState({
   // inert/shadow-safe: !present is always false → nothing is excluded until the
   // daemon binds the real fs check. See selectAnchorCandidates.
   hasTriageArtifact = () => true,
+  // CAT-82 (Codex P1): the OTHER half of the producer's candidate set. The real
+  // producer (sweepMissingTriage) sweeps `Triage-state board ∪ eligible set`, but
+  // `eligible` is fed by a Todo-only query — so a missing-artifact ticket already
+  // sitting in Linear's Triage state is invisible here. When no Todo candidate
+  // coexists, the join produced an empty untriaged list and reported HEALTHY while
+  // the sole real producer candidate was being held every sweep. Injected (rather
+  // than read here) so board-health.mjs stays IO-free; default [] is inert, which
+  // preserves the old Todo-only behavior until the scheduler binds the real read.
+  getTriageStateCandidates = () => [],
+  // CAT-82 (Codex P2): the producer's claimability filter. dispatchTriage
+  // deliberately returns WITHOUT producing a triage.json for a ticket delegated to
+  // a non-Catalyst actor, so that is not work this producer can or should advance —
+  // counting it as untriaged reports deliberately external work as stalled Catalyst
+  // triage production once completion freshness goes stale. Default () => true is
+  // fail-open/inert (nothing excluded) until the scheduler binds the real predicate,
+  // matching the hasTriageArtifact convention above.
+  isTriageClaimable = () => true,
 } = {}) {
   const nowMs = now();
   const safe = (fn, fallback) => {
@@ -592,13 +609,42 @@ export function assembleBoardState({
     project: e.project ?? e.projectName ?? null,
     state: e.state ?? e.linear_state ?? null,
     updatedAt: e.updatedAt ?? e.updated_at ?? null,
+    // CAT-82 (Codex P2): preserve the delegate already carried on the eligible row
+    // so the triage-production filter below can apply the producer's own
+    // claimability rule instead of discarding it.
+    delegate: e.delegate ?? null,
   }));
+
+  // CAT-82 (Codex P1): reconstruct the PRODUCER's candidate set — the same
+  // `Triage-state board ∪ eligible set` union sweepMissingTriage walks, deduped by
+  // ticket id with the eligible copy winning (it is the live-confirmed one, exactly
+  // as the producer's dual-presence rule prefers it). Only the triage-production
+  // invariant reads this; every other invariant keeps using `eligible` unchanged.
+  const triageCandidates = [];
+  if (mode !== "off" && triageProductionMode !== "off") {
+    const seen = new Set();
+    for (const e of eligible) {
+      if (!e.id || seen.has(e.id)) continue;
+      seen.add(e.id);
+      triageCandidates.push({ id: e.id, delegate: e.delegate ?? null });
+    }
+    for (const t of safe(() => getTriageStateCandidates(), [])) {
+      const id = t?.identifier ?? t?.id ?? t?.ticket ?? null;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      triageCandidates.push({ id, delegate: t?.delegate ?? null });
+    }
+  }
 
   const untriagedEligible = new Set();
   if (mode !== "off" && triageProductionMode !== "off") {
-    for (const e of eligible) {
-      if (!e.id) continue;
-      try { if (!hasTriageArtifact(e.id)) untriagedEligible.add(e.id); } catch { /* fail open */ }
+    for (const c of triageCandidates) {
+      if (!c.id) continue;
+      // Fail OPEN on either seam: a throwing artifact check or claimability
+      // predicate must never manufacture a starvation signal.
+      try { if (hasTriageArtifact(c.id)) continue; } catch { continue; }
+      try { if (!isTriageClaimable(c)) continue; } catch { /* fail open — keep it */ }
+      untriagedEligible.add(c.id);
     }
   }
 
@@ -698,6 +744,9 @@ export function assembleBoardState({
     // the daemon binds the real fs check at the scheduler call site).
     triageLaunchFailureOnlyTickets,
     untriagedEligible,
+    // CAT-82: the producer's full candidate set (eligible ∪ Triage-state), read
+    // ONLY by checkTriageProduction. Empty unless the invariant is enabled.
+    triageCandidates,
   });
 }
 
@@ -997,7 +1046,14 @@ function checkTriageProduction(b, t) {
   const mode = b?.triageProductionMode ?? "shadow";
   if (mode === "off") return invariant(true, 0, false, [], "off: triage production disabled");
   const owns = makeOwnsFilter(b, { scope: "dispatch" });
-  const untriaged = (b?.eligible ?? []).map((e) => e?.id)
+  // CAT-82 (Codex P1): walk the PRODUCER's candidate set, not the Todo-only
+  // eligible projection — a missing-artifact ticket already in Linear's Triage
+  // state is a real producer candidate the eligible half can never surface, and
+  // when no Todo candidate coexisted this join went empty and reported healthy
+  // while the sole candidate was held every sweep. Falls back to `eligible` for a
+  // caller that assembled board state before triageCandidates existed.
+  const candidates = b?.triageCandidates ?? b?.eligible ?? [];
+  const untriaged = candidates.map((e) => e?.id)
     .filter((id) => id && b?.untriagedEligible?.has?.(id) && owns(id));
   const last = b?.ring?.recentTriageCompleteTs ?? null;
   const lastCompleteAgeMs = last == null ? null : Math.max(0, b.now - last);
@@ -2072,6 +2128,8 @@ export function boardHealthPass({
   getPeerProductivity,
   productivityMode,
   triageProductionMode,
+  getTriageStateCandidates, // CAT-82: producer-parity candidate seam
+  isTriageClaimable, // CAT-82: producer-parity claimability seam
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -2107,6 +2165,10 @@ export function boardHealthPass({
     triageProductionMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
+    // CAT-82: same convention for the producer-parity seams — undefined leaves the
+    // inert defaults ([] / always-claimable) in place for a bare tick.
+    ...(getTriageStateCandidates !== undefined ? { getTriageStateCandidates } : {}),
+    ...(isTriageClaimable !== undefined ? { isTriageClaimable } : {}),
   });
   const invariants = evaluateInvariants(board, { mode });
   const dec = decideBoardHealth(invariants, board);

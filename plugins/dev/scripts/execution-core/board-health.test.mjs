@@ -98,6 +98,10 @@ function mkBoard(o = {}) {
     productivityMode: o.productivityMode ?? "shadow",
     triageProductionMode: o.triageProductionMode ?? "shadow",
     untriagedEligible: o.untriagedEligible ?? new Set(),
+    // CAT-82: the producer's full candidate set (eligible ∪ Triage-state). Left
+    // undefined unless a test sets it, so the `?? b.eligible` back-compat fallback
+    // in checkTriageProduction stays exercised by every pre-existing case.
+    triageCandidates: o.triageCandidates,
     ring: {
       recentDispatchTs: null,
       cacheReconcile: null,
@@ -3058,5 +3062,123 @@ describe("CAT-82 triage evidence and production", () => {
     expect(buildBoardContext(b, invs).triageProduction.untriaged).toHaveLength(5);
     const ev = buildBoardScanEvent({ mode: "enforce", invariants: invs, decision: decideBoardHealth(invs, b), board: b });
     expect(ev.details).toMatchObject({ triageUntriagedEligible: 12, triageLastCompleteAgeMs: HOUR });
+  });
+
+  // ── CAT-82 (Codex P1): producer parity — the Triage-state half of the candidate
+  // set. sweepMissingTriage walks `Triage-state board ∪ eligible set`, but the
+  // eligible set is a Todo-only projection, so a missing-artifact ticket already
+  // sitting in the Triage state was invisible here. With no coexisting Todo
+  // candidate the join went empty and the invariant reported HEALTHY while the
+  // sole real producer candidate was being held every single sweep.
+  test("a Triage-state candidate is seen even when no Todo candidate coexists", () => {
+    const board = assembleBoardState({
+      mode: "shadow",
+      triageProductionMode: "enforce",
+      getEligible: () => [], // the Todo-only projection is EMPTY — the whole point
+      getTriageStateCandidates: () => [{ identifier: "CAT-9" }],
+      hasTriageArtifact: () => false,
+      now: () => NOW,
+    });
+    expect([...board.untriagedEligible]).toEqual(["CAT-9"]);
+    expect(board.triageCandidates.map((c) => c.id)).toEqual(["CAT-9"]);
+
+    // …and it actually drives the invariant, rather than merely being recorded.
+    const inv = evaluateInvariants(mkBoard({
+      eligible: [],
+      triageCandidates: [{ id: "CAT-9", delegate: null }],
+      untriagedEligible: new Set(["CAT-9"]),
+      triageProductionMode: "enforce",
+      ring: { recentTriageCompleteTs: NOW - HOUR, triageSweepHeld: new Set() },
+    })).triageProduction;
+    expect(inv).toMatchObject({ ok: false, observable: true, failed: 1, flagged: ["CAT-9"] });
+  });
+
+  test("the two candidate halves dedupe, with the live-confirmed eligible copy winning", () => {
+    const board = assembleBoardState({
+      mode: "shadow",
+      triageProductionMode: "enforce",
+      // The eligible copy carries the enriched delegate; the stale Triage row does not.
+      getEligible: () => [{ identifier: "CAT-1", delegate: "bot-1" }],
+      getTriageStateCandidates: () => [{ identifier: "CAT-1", delegate: null }, { identifier: "CAT-2" }],
+      hasTriageArtifact: () => false,
+      now: () => NOW,
+    });
+    expect(board.triageCandidates).toEqual([
+      { id: "CAT-1", delegate: "bot-1" },
+      { id: "CAT-2", delegate: null },
+    ]);
+  });
+
+  test("an unreadable Triage board degrades to the eligible half, never to false starvation", () => {
+    const board = assembleBoardState({
+      mode: "shadow",
+      triageProductionMode: "enforce",
+      getEligible: () => [{ identifier: "CAT-1" }],
+      getTriageStateCandidates: () => { throw new Error("replica down"); },
+      hasTriageArtifact: () => false,
+      now: () => NOW,
+    });
+    expect([...board.untriagedEligible]).toEqual(["CAT-1"]);
+  });
+
+  test("the candidate seam defaults inert and is never consulted when disabled", () => {
+    // Default: Todo-only, exactly the pre-CAT-82 behavior.
+    const bare = assembleBoardState({
+      mode: "shadow", triageProductionMode: "enforce",
+      getEligible: () => [{ identifier: "CAT-1" }], hasTriageArtifact: () => false, now: () => NOW,
+    });
+    expect(bare.triageCandidates.map((c) => c.id)).toEqual(["CAT-1"]);
+
+    for (const off of [{ mode: "off" }, { triageProductionMode: "off" }]) {
+      let called = 0;
+      const b = assembleBoardState({
+        mode: "shadow", triageProductionMode: "enforce", ...off,
+        getEligible: () => [{ identifier: "CAT-1" }],
+        getTriageStateCandidates: () => { called++; return []; },
+        hasTriageArtifact: () => false, now: () => NOW,
+      });
+      expect(called).toBe(0);
+      expect(b.triageCandidates).toEqual([]);
+    }
+  });
+
+  // ── CAT-82 (Codex P2): claimability parity. dispatchTriage deliberately returns
+  // WITHOUT producing a triage.json for a ticket delegated to a non-Catalyst
+  // actor, so counting it as untriaged reports deliberately external work as
+  // stalled Catalyst triage production.
+  test("an externally delegated ticket is excluded from producer health", () => {
+    const board = assembleBoardState({
+      mode: "shadow",
+      triageProductionMode: "enforce",
+      getEligible: () => [
+        { identifier: "CAT-1", delegate: "someone-else" },
+        { identifier: "CAT-2", delegate: "our-bot" },
+        { identifier: "CAT-3", delegate: null }, // undelegated is still OURS to claim
+      ],
+      hasTriageArtifact: () => false,
+      isTriageClaimable: (row) => row.delegate == null || row.delegate === "our-bot",
+      now: () => NOW,
+    });
+    expect([...board.untriagedEligible].sort()).toEqual(["CAT-2", "CAT-3"]);
+  });
+
+  test("the claimability seam defaults open and fails open when it throws", () => {
+    const bare = assembleBoardState({
+      mode: "shadow", triageProductionMode: "enforce",
+      getEligible: () => [{ identifier: "CAT-1", delegate: "someone-else" }],
+      hasTriageArtifact: () => false, now: () => NOW,
+    });
+    expect([...bare.untriagedEligible]).toEqual(["CAT-1"]);
+
+    const thrown = assembleBoardState({
+      mode: "shadow", triageProductionMode: "enforce",
+      getEligible: () => [{ identifier: "CAT-1" }],
+      hasTriageArtifact: () => false,
+      isTriageClaimable: () => { throw new Error("gate"); },
+      now: () => NOW,
+    });
+    // Fail OPEN keeps the ticket — a broken predicate must not silently hide real
+    // starvation, and this invariant is escalate-only in enforce anyway.
+    expect([...thrown.untriagedEligible]).toEqual(["CAT-1"]);
   });
 });
