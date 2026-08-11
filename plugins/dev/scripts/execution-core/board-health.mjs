@@ -80,6 +80,8 @@ const DEFAULT_THRESHOLDS = {
   stalledPrNoPushMs: Number(process.env.CATALYST_BH_STALLED_PR_NOPUSH_MS) || 5 * 24 * 3_600_000,
   githubCoreRemainingPct: GITHUB_QUOTA_DEFAULTS.coreRemainingPct,
   githubQuotaStaleMs: GITHUB_QUOTA_DEFAULTS.stalenessMs,
+  // CAT-82: three missed 10-minute triage reconciliation sweeps.
+  triageProductionStallMs: Number(process.env.CATALYST_BH_TRIAGE_STALL_MS) || 30 * 60_000,
 };
 
 // single-LLM cadence floor: most ticks are a near-instant no-op (cheap gates),
@@ -374,6 +376,8 @@ function extractBlockers(descriptor) {
 function deriveRing(events, nowMs, self) {
   const ring = {
     recentDispatchTs: null,
+    recentTriageCompleteTs: null,
+    triageSweepHeld: new Set(),
     cacheReconcile: null,
     accountRatelimit: null,
     reconcileFailing: new Set(),
@@ -392,6 +396,16 @@ function deriveRing(events, nowMs, self) {
       const evHost = ev?.resource?.["host.name"] ?? ev?.body?.payload?.["host.name"] ?? null;
       const isOurs = !self || !evHost || evHost === self;
       if (isOurs && Number.isFinite(tsMs)) ring.recentDispatchTs = Math.max(ring.recentDispatchTs ?? 0, tsMs);
+    } else if (/^phase\.triage\.complete\./.test(name)) {
+      const evHost = ev?.resource?.["host.name"] ?? ev?.body?.payload?.["host.name"] ?? null;
+      const isOurs = !self || !evHost || evHost === self;
+      if (isOurs && Number.isFinite(tsMs)) ring.recentTriageCompleteTs = Math.max(ring.recentTriageCompleteTs ?? 0, tsMs);
+    } else if (/^monitor\.triage\.(held|recovered)\./.test(name)) {
+      const team = name.split(".").pop();
+      if (team) {
+        if (/\.held\./.test(name)) ring.triageSweepHeld.add(team);
+        else ring.triageSweepHeld.delete(team);
+      }
     } else if (/cache\.reconcile/i.test(name)) {
       ring.cacheReconcile = {
         changed: payload.changed ?? payload.corrected ?? 0,
@@ -432,6 +446,9 @@ function deriveRing(events, nowMs, self) {
   // guard against a stale dispatch ts in the future / absurd past
   if (ring.recentDispatchTs != null && (ring.recentDispatchTs > nowMs + 60_000)) {
     ring.recentDispatchTs = nowMs;
+  }
+  if (ring.recentTriageCompleteTs != null && ring.recentTriageCompleteTs > nowMs + 60_000) {
+    ring.recentTriageCompleteTs = nowMs;
   }
   return ring;
 }
@@ -516,6 +533,7 @@ export function assembleBoardState({
   githubQuotaMode = process.env.CATALYST_BH_GH_QUOTA || "shadow",
   getPeerProductivity = () => null,
   productivityMode = process.env.CATALYST_BH_PRODUCTIVITY || "shadow",
+  triageProductionMode = process.env.CATALYST_BH_TRIAGE_PRODUCTION || "shadow",
   now = () => Date.now(),
   // CTL-1649: does a triage.json artifact exist for a given ticket? Injected so
   // board-health.mjs stays fs-free (no fs import). Default () => true is
@@ -568,6 +586,14 @@ export function assembleBoardState({
     state: e.state ?? e.linear_state ?? null,
     updatedAt: e.updatedAt ?? e.updated_at ?? null,
   }));
+
+  const untriagedEligible = new Set();
+  if (mode !== "off" && triageProductionMode !== "off") {
+    for (const e of eligible) {
+      if (!e.id) continue;
+      try { if (!hasTriageArtifact(e.id)) untriagedEligible.add(e.id); } catch { /* fail open */ }
+    }
+  }
 
   // CTL-1649: compute the set of tickets whose ONLY non-clean signal is a triage
   // launch failure. These are excluded from selectAnchorCandidates (the actuation
@@ -646,6 +672,7 @@ export function assembleBoardState({
     githubQuota: mode === "off" || githubQuotaMode === "off" ? null : safe(() => getGithubQuota(), null),
     githubQuotaMode: ["off", "shadow", "enforce"].includes(githubQuotaMode) ? githubQuotaMode : "shadow",
     productivityMode: ["off", "shadow", "enforce"].includes(productivityMode) ? productivityMode : "shadow",
+    triageProductionMode: ["off", "shadow", "enforce"].includes(triageProductionMode) ? triageProductionMode : "shadow",
     peerProductivity: mode === "off" || productivityMode === "off" ? null : safe(() => getPeerProductivity(), null),
     ring: deriveRing(safe(() => readEventRing({ orchDir }), []), nowMs, self ?? ""),
     ownerForTicket: typeof ownerForTicket === "function" ? ownerForTicket : null,
@@ -663,6 +690,7 @@ export function assembleBoardState({
     // hasTriageArtifact seam this is always an empty Set (shadow-safe, inert until
     // the daemon binds the real fs check at the scheduler call site).
     triageLaunchFailureOnlyTickets,
+    untriagedEligible,
   });
 }
 
@@ -713,6 +741,7 @@ export function evaluateInvariants(boardState, { thresholds = DEFAULT_THRESHOLDS
       // gated like its siblings so the off set stays byte-identical.
       stalledPr: () => checkStalledPr(boardState, thresholds),
       nodeProductivity: () => checkNodeProductivity(boardState, thresholds),
+      triageProduction: () => checkTriageProduction(boardState, thresholds),
     });
   }
   const out = {};
@@ -954,6 +983,38 @@ function checkNodeProductivity(b, t) {
   // true here (observable:false likewise keeps Gate 3 from reading it).
   if (mode !== "enforce") return invariant(true, 0, false, flagged, `${mode}: ${note}`, { unproductive: details });
   return invariant(flagged.length === 0, flagged.length, true, flagged, note, { unproductive: details });
+}
+
+// #17 — triage production (CAT-82). Escalate-only by design.
+function checkTriageProduction(b, t) {
+  const mode = b?.triageProductionMode ?? "shadow";
+  if (mode === "off") return invariant(true, 0, false, [], "off: triage production disabled");
+  const owns = makeOwnsFilter(b, { scope: "dispatch" });
+  const untriaged = (b?.eligible ?? []).map((e) => e?.id)
+    .filter((id) => id && b?.untriagedEligible?.has?.(id) && owns(id));
+  const last = b?.ring?.recentTriageCompleteTs ?? null;
+  const lastCompleteAgeMs = last == null ? null : Math.max(0, b.now - last);
+  const sweepHeldTeams = [...(b?.ring?.triageSweepHeld ?? [])];
+  let starved = false;
+  let observable = true;
+  let note = "triage production healthy";
+  if ((b?.capacity?.freeSlots ?? 0) <= 0) note = "no free slots for triage production";
+  else if (untriaged.length === 0) note = "no owned untriaged eligible tickets";
+  else if (last != null) {
+    starved = lastCompleteAgeMs > t.triageProductionStallMs;
+    note = starved ? `triage production silent for ${lastCompleteAgeMs}ms` : "triage producing within window";
+  } else if (sweepHeldTeams.length > 0) {
+    starved = true;
+    note = `triage sweep held for ${sweepHeldTeams.join(", ")} with no completion in event tail`;
+  } else {
+    observable = false;
+    note = "no triage completion in the bounded event tail and no held-sweep evidence";
+  }
+  const flagged = starved ? untriaged.slice(0, 5) : [];
+  const extra = { untriagedCount: untriaged.length, lastCompleteAgeMs, sweepHeldTeams };
+  if (mode !== "enforce") return invariant(true, 0, false, flagged, `${mode}: ${note}`, extra);
+  if (!observable) return invariant(true, 0, false, [], note, extra);
+  return invariant(!starved, starved ? 1 : 0, true, flagged, note, extra);
 }
 
 // CTL-1435 (C2): the skippedReason values that mean "the delegate proceeded with
@@ -1648,6 +1709,9 @@ export function proposeMoves(invariants, _b) {
       rationale: "rostered node owns work and is live but has advanced nothing past a phase boundary",
     });
   }
+  if (invariants.triageProduction && !invariants.triageProduction.ok) {
+    tier3.push({ move: "escalate-triage-production", rationale: invariants.triageProduction.note });
+  }
   for (const p of invariants.projectSilence?.flagged ?? []) {
     if (!invariants.projectSilence.ok) tier3.push({ project: p, move: "escalate-project-silence", rationale: "no movement in expected cadence" });
   }
@@ -1779,7 +1843,7 @@ export function buildBoardContext(boardState, invariants) {
   return {
     // CAT-57: v4 adds owned queue/productivity fields; readers remain additive.
     // field to []). The skill reads them defensively, never gates on the schema.
-    schema: "recovery-board-context/v4",
+    schema: "recovery-board-context/v5",
     snapshotAt: new Date(boardState.now).toISOString(),
     host: { self: boardState.self, roster: boardState.roster, multiHost: boardState.multiHost },
     slots: {
@@ -1835,6 +1899,11 @@ export function buildBoardContext(boardState, invariants) {
       ageMs: invariants.nodeProductivity?.unproductive?.[host]?.ageMs ?? null,
       ownedTickets: invariants.nodeProductivity?.unproductive?.[host]?.ownedTickets ?? [],
     })),
+    triageProduction: {
+      untriaged: invariants.triageProduction?.flagged ?? [],
+      lastCompleteAgeMs: invariants.triageProduction?.lastCompleteAgeMs ?? null,
+      sweepHeldTeams: invariants.triageProduction?.sweepHeldTeams ?? [],
+    },
     invariants: Object.fromEntries(
       Object.entries(invariants).map(([k, v]) => [k, { ok: v.ok, failed: v.failed }]),
     ),
@@ -1925,6 +1994,8 @@ export function buildBoardScanEvent({ mode, invariants, decision, act = null, bo
       slotFree,
       eligibleOwnedDepth: board == null ? null : board.eligible.filter((e) => owns(e.id)).length,
       unproductiveNodeCount: invariants.nodeProductivity?.flagged?.length ?? 0,
+      triageUntriagedEligible: invariants.triageProduction?.untriagedCount ?? 0,
+      triageLastCompleteAgeMs: invariants.triageProduction?.lastCompleteAgeMs ?? null,
       githubCoreRemaining: githubQuota?.remaining ?? null,
       githubCoreRemainingPct: githubQuota?.remainingPct ?? null,
       invariants: Object.fromEntries(
@@ -1987,6 +2058,7 @@ export function boardHealthPass({
   githubQuotaMode,
   getPeerProductivity,
   productivityMode,
+  triageProductionMode,
   deadHosts, // CTL-1157: provably-dead host set (daemon-computed)
   lastRunMs = _lastRunMs,
   intervalMs = BOARD_HEALTH_INTERVAL_MS,
@@ -2019,6 +2091,7 @@ export function boardHealthPass({
     githubQuotaMode,
     getPeerProductivity,
     productivityMode,
+    triageProductionMode,
     // CTL-1649: thread the daemon-injected triage artifact seam (undefined → default inert).
     ...(hasTriageArtifact !== undefined ? { hasTriageArtifact } : {}),
   });
