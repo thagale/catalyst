@@ -227,6 +227,7 @@ import {
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
+  defaultAppendFenceSuppressedEvent,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -3387,6 +3388,10 @@ function fenceSuppressMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".fence-suppressed");
 }
 
+function fenceSuppressedEmitMarkerPath(orchDir, ticket, site) {
+  return join(orchDir, "workers", ticket, `.escalation-fence-suppressed-${site}.applied`);
+}
+
 // The escalation-side cooldown is a SEPARATE marker from `.fence-suppressed`, and
 // deliberately so. `.fence-suppressed` means "a fence-guarded write was SUPPRESSED
 // here", and terminalDoneOnce reads it as a reason to skip its own probe. The
@@ -3966,6 +3971,31 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
+export function emitFenceSuppressedOnce(
+  orchDir,
+  ticket,
+  site,
+  self,
+  appendFenceSuppressedEvent
+) {
+  const marker = fenceSuppressedEmitMarkerPath(orchDir, ticket, site);
+  if (existsSync(marker)) return;
+  try {
+    const ok = appendFenceSuppressedEvent({
+      ticket,
+      site,
+      host: self,
+      reason: "fence-suppressed",
+    });
+    if (ok !== false) writeFileSync(marker, "");
+  } catch (err) {
+    log.warn(
+      { ticket, site, err: err.message },
+      "cat-3: fence-suppressed emit threw — continuing tick"
+    );
+  }
+}
+
 // defaultJanitorKillIntentRecorder — CTL-1004 J2's kill seam, backed by the
 // CTL-936 intentDb (beliefs.db) already threaded into the tick. Mirrors
 // recovery.mjs's intentAwareKill EXACTLY: it BOTH issues the real stop
@@ -4434,6 +4464,7 @@ export function schedulerTick(
     appendFenceStandoffEvent = defaultAppendFenceStandoffEvent,
     // CAT-173: injectable terminal-sweep fence seam for scheduler integration tests.
     terminalFenceGuard = fenceGuard,
+    appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent,
     // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.

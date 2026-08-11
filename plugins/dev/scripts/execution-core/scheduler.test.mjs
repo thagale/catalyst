@@ -44,6 +44,7 @@ import {
   listStartedTickets,
   schedulerTick,
   readAllEligibleTickets,
+  emitFenceSuppressedOnce,
   hydrateOutOfSetBlockers,
   startScheduler,
   stopScheduler,
@@ -101,6 +102,33 @@ import {
   pruneExpiredReservations,
   SLOT_RESERVATION_LAPSE_MS,
 } from "./scheduler.mjs";
+
+describe("emitFenceSuppressedOnce", () => {
+  let dir;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "fence-suppressed-")); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("emits once per ticket and site with the operator payload", () => {
+    mkdirSync(join(dir, "workers", "CAT-3"), { recursive: true });
+    const calls = [];
+    const emit = (payload) => { calls.push(payload); return true; };
+    emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", emit);
+    emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", emit);
+    emitFenceSuppressedOnce(dir, "CAT-3", "dependency-cycle", "host-a", emit);
+    expect(calls).toEqual([
+      { ticket: "CAT-3", site: "terminal-sweep", host: "host-a", reason: "fence-suppressed" },
+      { ticket: "CAT-3", site: "dependency-cycle", host: "host-a", reason: "fence-suppressed" },
+    ]);
+  });
+
+  test("does not write a marker when the emitter returns false or throws", () => {
+    mkdirSync(join(dir, "workers", "CAT-3"), { recursive: true });
+    emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", () => false);
+    emitFenceSuppressedOnce(dir, "CAT-3", "dependency-cycle", "host-a", () => { throw new Error("boom"); });
+    expect(existsSync(join(dir, "workers", "CAT-3", ".escalation-fence-suppressed-terminal-sweep.applied"))).toBe(false);
+    expect(existsSync(join(dir, "workers", "CAT-3", ".escalation-fence-suppressed-dependency-cycle.applied"))).toBe(false);
+  });
+});
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
