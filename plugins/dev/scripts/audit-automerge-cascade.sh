@@ -127,9 +127,16 @@ pipeline_kind() {
 }
 
 classify_repo() {
-	local repo="$1" file="" body="" token="" status pipelines
+	local repo="$1" file="" body="" token="" status pipelines listing
+	if ! listing="$("$GH" api "repos/${repo}/contents/.github/workflows" --jq '.[].path' 2>/dev/null)"; then
+		printf '%s\t\t\tunknown\tunknown\n' "$repo"
+		return
+	fi
 	for candidate in auto-merge.yml auto-merge-own-prs.yml; do
-		if body="$(workflow_body "$repo" "$candidate")"; then file="$candidate"; break; fi
+		grep -qxF ".github/workflows/$candidate" <<<"$listing" || continue
+		if body="$(workflow_body "$repo" "$candidate")"; then file="$candidate"; break
+		else printf '%s\t%s\t\tunknown\tunknown\n' "$repo" "$candidate"; return
+		fi
 	done
 	if [[ -z "$file" ]]; then printf '%s\t\t\tnot-applicable\tnone\n' "$repo"; return; fi
 	token="$(merge_step_token <<<"$body")"
