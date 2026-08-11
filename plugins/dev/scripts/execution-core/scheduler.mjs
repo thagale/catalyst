@@ -6610,6 +6610,13 @@ export function schedulerTick(
                 { ticket: member },
                 "ctl-863: stale fence — suppressing labelOnce(needs-human/cycle) write (zombie guard)"
               );
+              emitFenceSuppressedOnce(
+                orchDir,
+                member,
+                "dependency-cycle",
+                self,
+                appendFenceSuppressedEvent
+              );
             }
           }
         }
@@ -7504,6 +7511,18 @@ export function schedulerTick(
                 source: "ctl-925-cycle",
               });
             }
+          } else {
+            log.warn(
+              { ticket: member },
+              "ctl-863: stale fence — suppressing labelOnce(needs-human/ctl-925-cycle) write (zombie guard)"
+            );
+            emitFenceSuppressedOnce(
+              orchDir,
+              member,
+              "ctl-925-cycle",
+              self,
+              appendFenceSuppressedEvent
+            );
           }
         }
       }
@@ -8203,6 +8222,13 @@ export function schedulerTick(
             // CTL-1329: arm the cooldown so the next ticks skip this dir's probe+fence
             // instead of re-burning Linear quota every tick until the dir is reaped.
             stampFenceSuppress(orchDir, ticket, now());
+            emitFenceSuppressedOnce(
+              orchDir,
+              ticket,
+              "terminal-sweep",
+              self,
+              appendFenceSuppressedEvent
+            );
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
           // non-terminal stalled/failed-no-recovery ticket is visible on the dashboard
