@@ -606,6 +606,12 @@ default) and fails open when its marker is absent or malformed. Scheduler Pass 4
 `orchDir/.fence-suppressed-emits/` with a TTL equal to that window, so raising the emission window
 also raises marker retention.
 
+The stale-PR rescue escalation path is fence-guarded, but the daemon deliberately leaves its
+`gateway` seam latent. Threading the production gateway would make the authoritative fence read
+fail closed; an indeterminate Linear read such as a 401 could then silently suppress the human
+escalation. The timer's `self` value remains load-bearing both as the discriminator for a
+self-owned projection row and as the `host` dimension on `escalation.fence-suppressed`.
+
 ### Runaway-loop guards (CTL-671)
 
 #### Terminally-stalled worker dirs and the dispatch gap (CAT-223)

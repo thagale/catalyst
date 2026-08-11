@@ -307,18 +307,21 @@ describe("startStalePrRescueTimer", () => {
     });
 
     const escalated = [];
+    const ceiling = () => 1;
     startStalePrRescueTimer({
       enabled: true,
       orchDir,
       intervalSeconds: 1,
       config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      maxParallel: ceiling,
       clock,
-      ...makeSeams({ escalate: (t) => escalated.push(t) }),
+      ...makeSeams({ escalate: (t, detail, opts) => escalated.push({ t, detail, opts }) }),
     });
     clock.advance(1_000);
     await new Promise(r => setTimeout(r, 20));
     expect(escalated.length).toBe(1);
-    expect(escalated[0]).toBe("CTL-6");
+    expect(escalated[0].t).toBe("CTL-6");
+    expect(escalated[0].opts.maxParallel).toBe(ceiling);
   });
 
   it("tick: MERGED → no action, rescue state ignored", async () => {
@@ -769,17 +772,20 @@ describe("timer-level decision paths (previously only covered in the pure core)"
     });
 
     const escalated = [];
+    const ceiling = () => 1;
     startStalePrRescueTimer({
       enabled: true, orchDir, intervalSeconds: 1, clock,
       config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      maxParallel: ceiling,
       ...makeSeams({
         worktreeExists: () => false,
-        escalate: (ticket, detail) => escalated.push({ ticket, detail }),
+        escalate: (ticket, detail, opts) => escalated.push({ ticket, detail, opts }),
       }),
     });
     clock.advance(1_000);
     await new Promise(r => setTimeout(r, 20));
     expect(escalated.length).toBe(1);
+    expect(escalated[0].opts.maxParallel).toBe(ceiling);
     const rs = readRescueState(orchDir, "CTL-41");
     expect(rs?.escalateReason).toBe("worktree_missing");
   });
@@ -815,6 +821,59 @@ describe("timer-level decision paths (previously only covered in the pure core)"
     const rs = readRescueState(orchDir, "CTL-42");
     expect(rs?.escalateReason).toBe("rescue_budget_exhausted");
     expect(rs?.rescueAttempts).toBe(1); // untouched
+  });
+});
+
+describe("CAT-219 latent gateway wiring", () => {
+  it("threads gateway, self, and the suppression sink through the real timer", async () => {
+    const priorDir = process.env.CATALYST_DIR;
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    process.env.CATALYST_DIR = orchDir;
+    try {
+      mkTicketDir(orchDir, "CAT-219");
+      writeSignal(orchDir, "CAT-219", "pr", {
+        status: "done",
+        bg_job_id: "dead",
+        pr: { number: 219, url: "https://github.com/org/repo/pull/219" },
+        worktreePath: "/gone/wt",
+      });
+      const events = [];
+      startStalePrRescueTimer({
+        enabled: true,
+        orchDir,
+        intervalSeconds: 1,
+        clock,
+        multiHost: true,
+        self: "host-a",
+        gateway: { getDescriptor: () => ({ ownerHost: "host-b", generation: 2 }) },
+        appendFenceSuppressedEvent: (event) => events.push(event),
+        ...makeSeams({ worktreeExists: () => false, escalate: defaultEscalate }),
+      });
+      clock.advance(1_000);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(events).toEqual([
+        {
+          ticket: "CAT-219",
+          site: "stale-pr-rescue",
+          host: "host-a",
+          reason: "fence-suppressed",
+        },
+      ]);
+    } finally {
+      if (priorDir === undefined) delete process.env.CATALYST_DIR;
+      else process.env.CATALYST_DIR = priorDir;
+    }
+  });
+
+  it("pins daemon gateway omission with the source marker", () => {
+    const source = readFileSync(join(import.meta.dir, "daemon.mjs"), "utf8");
+    const marker = source.indexOf("CAT-219-GATEWAY-LATENT");
+    const start = source.lastIndexOf("startStalePrRescueTimer({", marker);
+    const call = source.slice(start, source.indexOf("});", marker) + 3);
+    expect(call).toContain("CAT-219-GATEWAY-LATENT");
+    expect(call).toContain("maxParallel:");
+    expect(call).not.toMatch(/^\s*gateway\s*:/m);
   });
 });
 
