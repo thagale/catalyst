@@ -14,7 +14,13 @@ MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 FAILURES=0
 PASSES=0
 SCRATCH="$(mktemp -d)"
-trap 'rm -rf "$SCRATCH"' EXIT
+# CAT-264: keep --print fixtures outside linked worktrees/temp roots so the
+# CTL-1473 production guard does not mask host-name rendering assertions.
+mkdir -p "${HOME}/catalyst"
+BAKE="$(mktemp -d "${HOME}/catalyst/.catalyst-stack-test.XXXXXX")"
+mkdir -p "${BAKE}/log-shipper"
+cp "${REPO_ROOT}/plugins/dev/scripts/log-shipper/config.alloy" "${BAKE}/log-shipper/config.alloy"
+trap 'rm -rf "$SCRATCH" "$BAKE"' EXIT
 
 run() {
   local name="$1"; shift
@@ -516,21 +522,27 @@ HOSTCFG_HOME="${SCRATCH}/host_home"
 mkdir -p "${HOSTCFG_HOME}/.config/catalyst"
 printf '{"catalyst":{"host":{"name":"mini"}}}' > "${HOSTCFG_HOME}/.config/catalyst/config.json"
 
+run "install-services --print host-name fixture is non-ephemeral and renders output" bash -c "
+  ! bash -c 'source \"${STACK}\"; _is_ephemeral_dir \"${BAKE}\"' >/dev/null 2>&1 &&
+  out=\$(HOME='${HOSTCFG_HOME}' CATALYST_FORCE_BAKE_DIR='${BAKE}' '${STACK}' install-services --print 2>/dev/null) &&
+  [[ -n \"\$out\" ]]
+"
+
 run "install-services --print pins CATALYST_HOST_NAME key" bash -c "
-  HOME='${HOSTCFG_HOME}' '${STACK}' install-services --print 2>&1 | grep -q '<key>CATALYST_HOST_NAME</key>'
+  HOME='${HOSTCFG_HOME}' CATALYST_FORCE_BAKE_DIR='${BAKE}' '${STACK}' install-services --print 2>&1 | grep -q '<key>CATALYST_HOST_NAME</key>'
 "
 
 run "install-services --print pins configured host name value" bash -c "
-  HOME='${HOSTCFG_HOME}' '${STACK}' install-services --print 2>&1 | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
+  HOME='${HOSTCFG_HOME}' CATALYST_FORCE_BAKE_DIR='${BAKE}' '${STACK}' install-services --print 2>&1 | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
 "
 
 run "install-services --print honors CATALYST_LAYER2_CONFIG_FILE" bash -c "
-  CATALYST_LAYER2_CONFIG_FILE='${HOSTCFG_HOME}/.config/catalyst/config.json' '${STACK}' install-services --print 2>&1 | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
+  CATALYST_LAYER2_CONFIG_FILE='${HOSTCFG_HOME}/.config/catalyst/config.json' CATALYST_FORCE_BAKE_DIR='${BAKE}' '${STACK}' install-services --print 2>&1 | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
 "
 
 run "install-services --print omits key when host.name unset" bash -c "
   emptyhome=\$(mktemp -d);
-  out=\$(HOME=\"\$emptyhome\" '${STACK}' install-services --print 2>/dev/null);
+  out=\$(HOME=\"\$emptyhome\" CATALYST_FORCE_BAKE_DIR='${BAKE}' '${STACK}' install-services --print 2>/dev/null);
   printf '%s' \"\$out\" | grep -q 'ai.coalesce.catalyst-stack' && ! printf '%s' \"\$out\" | grep -q '<key>CATALYST_HOST_NAME</key>'
 "
 
@@ -661,7 +673,7 @@ run "install-services --print stack plist DOES set AbandonProcessGroup (CTL-1285
 "
 
 run "install-services --print log-shipper pins CATALYST_HOST_NAME from config" bash -c "
-  out=\$(HOME='${HOSTCFG_HOME}' '${STACK}' install-services --print 2>/dev/null)
+  out=\$(HOME='${HOSTCFG_HOME}' CATALYST_FORCE_BAKE_DIR='${BAKE}' '${STACK}' install-services --print 2>/dev/null)
   printf '%s\n' \"\$out\" | awk '/^<\?xml/{c++} c==3' | grep -A1 'CATALYST_HOST_NAME' | grep -q '<string>mini</string>'
 "
 
