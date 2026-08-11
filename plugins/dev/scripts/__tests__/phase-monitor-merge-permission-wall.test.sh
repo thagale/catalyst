@@ -23,6 +23,48 @@ assert_denial 'GraphQL: user does not have the correct permissions to execute `M
 assert_denial 'HTTP 403: Must have admin rights to Repository.' 0 "admin denial"
 assert_denial 'GraphQL: Pull request is not mergeable (mergePullRequest)' 1 "plain unmergeable"
 assert_denial 'HTTP 502: Bad gateway' 1 "transient failure"
+# --- escalation: exactly one emit, MANUAL (non-degraded) explanation ---
+# PLUGIN_ROOT is stubbed so the emit is recorded rather than appended to the
+# LIVE event log, and so "exactly once" is assertable.
+# shellcheck disable=SC2034  # consumed as globals by the sourced lib
+ORCH_ID="test"; TICKET="CAT-999"; PHASE="monitor-merge"
+ORCH_DIR="$TMPROOT/orch"; mkdir -p "$ORCH_DIR/workers/$TICKET"
+SIGNAL_FILE="$ORCH_DIR/workers/$TICKET/phase-${PHASE}.json"
+echo '{"ticket":"CAT-999","phase":"monitor-merge","status":"running"}' > "$SIGNAL_FILE"
+EMITLOG="$TMPROOT/emit.log"
+STUBROOT="$TMPROOT/stubroot"; mkdir -p "$STUBROOT/scripts/execution-core"
+cat > "$STUBROOT/scripts/phase-agent-emit-complete" <<EOS
+#!/usr/bin/env bash
+echo "\$*" >> "$EMITLOG"
+EOS
+chmod +x "$STUBROOT/scripts/phase-agent-emit-complete"
+cp "${REPO_ROOT}/plugins/dev/scripts/execution-core/escalation-explain.mjs" \
+   "${REPO_ROOT}/plugins/dev/scripts/execution-core/escalation-explanation.mjs" \
+   "$STUBROOT/scripts/execution-core/"
+# shellcheck disable=SC2034  # consumed as globals by the sourced lib
+COMMS=""
+# shellcheck disable=SC2034  # consumed as a global by the sourced lib
+CATALYST_COMMENT_POST_HELPER="/nonexistent"
+PLUGIN_ROOT="$STUBROOT" _escalate_merge_permission "coalesce-labs/catalyst" "3218" "READ" >/dev/null 2>&1
+
+assert_eq "$(wc -l < "$EMITLOG" | tr -d ' ')" "1" "emits exactly once (no attempts burned)"
+assert_contains "$(cat "$EMITLOG")" "--status failed" "emits status=failed"
+assert_contains "$(cat "$EMITLOG")" "merge_permission_denied" "emits the permission failureReason"
+SIG="$(cat "$SIGNAL_FILE")"
+assert_eq "$(jq -r '.status' <<<"$SIG")" "failed" "signal status=failed"
+assert_eq "$(jq -r '.failureReason' <<<"$SIG")" "merge_permission_denied" "signal failureReason set"
+assert_eq "$(jq -r '.explanation.escalation_type' <<<"$SIG")" "manual" "explanation is MANUAL, not authorization"
+assert_eq "$(jq -r '.explanation.degraded // "false"' <<<"$SIG")" "false" "explanation validates (not degraded)"
+assert_contains "$(jq -r '.explanation.problem' <<<"$SIG")" "coalesce-labs/catalyst" "problem names the repository"
+assert_contains "$(jq -r '.explanation.blocked_capability' <<<"$SIG")" "merge" "blocked_capability names the missing merge permission"
+CTA="$(jq -r '.explanation.call_to_action' <<<"$SIG")"
+assert_contains "$CTA" "merge" "CTA is actionable"
+if [[ "$(printf '%s' "$CTA" | tr '[:upper:]' '[:lower:]')" == *"authorize"*"retry"* ]]; then
+  fail "CTA must never ask the operator to authorize a retry"
+else
+  pass "CTA never asks the operator to authorize a retry"
+fi
+
 BODY="$(cat "$SKILL")"
 assert_contains "$BODY" "merge_permission_probe" "preflight wired"
 assert_contains "$BODY" "merge_denial_is_permission" "call-site classifier wired"
