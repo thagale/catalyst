@@ -42,6 +42,7 @@ import {
   maybeEscalateRemediateExhausted,
   listStartedTickets,
   schedulerTick,
+  makePeerProductivityReader,
   readAllEligibleTickets,
   hydrateOutOfSetBlockers,
   startScheduler,
@@ -95,6 +96,47 @@ import {
   // CTL-1667: current-run PR reader (for terminalDoneOnce gate tests)
   readCurrentRunPrNumber,
 } from "./scheduler.mjs";
+
+describe("CAT-126 productivity liveness seam", () => {
+  test("routes a multi-host read through the shared seam exactly once", () => {
+    const records = { mini: { last_advance_at: "2026-08-11T00:00:00Z" } };
+    const calls = [];
+    const read = makePeerProductivityReader({
+      roster: ["mini", "studio"],
+      getAnchorIssue: () => "CAT-1",
+      configured: (anchor) => (calls.push(["configured", anchor]), true),
+      readRecords: (anchor) => (calls.push(["read", anchor]), records),
+    });
+
+    expect(read()).toBe(records);
+    expect(calls).toEqual([["configured", "CAT-1"], ["read", "CAT-1"]]);
+  });
+
+  test("returns null without reading when the active transport is unconfigured", () => {
+    let reads = 0;
+    const read = makePeerProductivityReader({
+      roster: ["mini", "studio"],
+      getAnchorIssue: () => null,
+      configured: () => false,
+      readRecords: () => (reads += 1),
+    });
+    expect(read()).toBeNull();
+    expect(reads).toBe(0);
+  });
+
+  test("stays a single-host no-op ahead of the transport check", () => {
+    let configuredCalls = 0;
+    let reads = 0;
+    const read = makePeerProductivityReader({
+      roster: ["mini"],
+      configured: () => (configuredCalls += 1),
+      readRecords: () => (reads += 1),
+    });
+    expect(read()).toBeNull();
+    expect(configuredCalls).toBe(0);
+    expect(reads).toBe(0);
+  });
+});
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
