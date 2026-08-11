@@ -1163,24 +1163,32 @@ describe("defaultEscalate fence-suppressed event", () => {
   let dir;
   afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
 
-  it("emits once for a persistent fence suppression and preserves the outcome", () => {
+  it("emits once without creating a worker directory", () => {
     dir = mkdtempSync(join(tmpdir(), "stale-pr-fence-"));
-    mkdirSync(join(dir, "workers", "CAT-3"), { recursive: true });
-    writeFileSync(join(dir, "workers", "CAT-3", "cluster-generation.json"), JSON.stringify({ generation: 1 }));
     const events = [];
     const deps = {
       orchDir: dir,
       linearWrite: { applyLabel: () => ({ applied: true }) },
       multiHost: true,
       self: "host-a",
-      gateway: { escalate: () => ({ current: false }) },
+      gateway: {
+        getDescriptor: () => ({ ownerHost: "host-b", generation: 2 }),
+      },
       appendFenceSuppressedEvent: (event) => events.push(event),
     };
     const outcome = defaultEscalate("CAT-3", {}, deps);
     defaultEscalate("CAT-3", {}, deps);
     defaultEscalate("CAT-3", {}, deps);
     expect(outcome).toEqual({ confirmed: false, routed: false, reason: "fence-suppressed" });
-    expect(events).toEqual([{ ticket: "CAT-3", site: "stale-pr-rescue", host: "host-a", reason: "fence-suppressed" }]);
+    expect(events).toEqual([
+      {
+        ticket: "CAT-3",
+        site: "stale-pr-rescue",
+        host: "host-a",
+        reason: "fence-suppressed",
+      },
+    ]);
+    expect(existsSync(join(dir, "workers", "CAT-3"))).toBe(false);
   });
 
   it("does not emit for a missing Linear transport", () => {

@@ -621,12 +621,40 @@ export function defaultAppendOrphanDetectedEvent({
 
 // CAT-3 — operator-visible record of a deliberately suppressed escalation write.
 // This uses the generic operator envelope because escalation.* is not phase-keyed.
-export function defaultAppendFenceSuppressedEvent({ ticket, site, host, reason = "fence-suppressed" }) {
+export function defaultAppendFenceSuppressedEvent({
+  ticket,
+  site,
+  host,
+  reason = "fence-suppressed",
+}) {
   return defaultAppendOperatorEvent({
     "event.name": "escalation.fence-suppressed",
     payload: { ticket, site, host, reason },
     attributes: { ticket, site, host, reason },
   });
+}
+
+// Keep observability-only markers outside workers/: an empty workers/<ticket>
+// directory is interpreted as started work until the orphan grace expires.
+export function emitFenceSuppressedEventOnce(
+  orchDir,
+  ticket,
+  site,
+  host,
+  appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent
+) {
+  const marker = join(orchDir, ".fence-suppressed-emits", `${ticket}-${site}.applied`);
+  if (existsSync(marker) || typeof appendFenceSuppressedEvent !== "function") return;
+  const ok = appendFenceSuppressedEvent({
+    ticket,
+    site,
+    host,
+    reason: "fence-suppressed",
+  });
+  if (ok !== false) {
+    mkdirSync(dirname(marker), { recursive: true });
+    writeFileSync(marker, "");
+  }
 }
 
 // ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────
