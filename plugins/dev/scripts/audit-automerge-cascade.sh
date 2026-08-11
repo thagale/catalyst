@@ -55,7 +55,7 @@ render_template() {
 patch_workflow() {
 	local file="$1" tmp target env_line merge_line
 	grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' "$file" || { echo refused; return 3; }
-	if grep -qF 'AUTOMERGE_PAT: ${{ secrets.' "$file" &&
+	if grep -qF "AUTOMERGE_PAT: \${{ secrets.${SECRET_NAME} }}" "$file" &&
 		grep -qF '::warning title=Auto-merge cascade suppressed::' "$file"; then
 		echo already-current
 		return 0
@@ -73,6 +73,7 @@ patch_workflow() {
 	awk -v secret="$SECRET_NAME" -v env_line="$env_line" -v merge_line="$merge_line" '
 		NR == env_line {
 			match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH)
+			print $0
 			print indent "# CAT-151: GITHUB_TOKEN merges do not start downstream workflows."
 			print indent "AUTOMERGE_PAT: ${{ secrets." secret " }}"
 			print indent "FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
@@ -194,28 +195,37 @@ pipeline_kind() {
 	list="$("$GH" api "repos/${repo}/contents/.github/workflows" --jq '.[].path' 2>/dev/null)" || { echo unknown; return; }
 	while IFS= read -r path; do
 		[[ -n "$path" ]] || continue
-		body="$(workflow_body "$repo" "${path##*/}" 2>/dev/null || true)"
+		if ! body="$(workflow_body "$repo" "${path##*/}" 2>/dev/null)"; then
+			found=unknown
+			continue
+		fi
 		if grep -qE 'workflow_run:' <<<"$body"; then found=workflow_run
-		elif [[ "$found" == none ]] && grep -qE '^[[:space:]]*push:' <<<"$body" && grep -qE 'main' <<<"$body"; then found=push; fi
+		elif [[ "$found" == none ]] && grep -qE '^[[:space:]]*push:' <<<"$body"; then found=push; fi
 	done <<<"$list"
 	echo "$found"
 }
 
 classify_repo() {
-	local repo="$1" file="" body="" token="" status pipelines listing
+	local repo="$1" file="" path body="" token="" status pipelines listing
 	if ! listing="$("$GH" api "repos/${repo}/contents/.github/workflows" --jq '.[].path' 2>/dev/null)"; then
 		printf '%s\t\t\tunknown\tunknown\n' "$repo"
 		return
 	fi
-	for candidate in auto-merge.yml auto-merge-own-prs.yml; do
-		grep -qxF ".github/workflows/$candidate" <<<"$listing" || continue
-		if body="$(workflow_body "$repo" "$candidate")"; then file="$candidate"; break
-		else printf '%s\t%s\t\tunknown\tunknown\n' "$repo" "$candidate"; return
+	while IFS= read -r path; do
+		[[ -n "$path" ]] || continue
+		if ! body="$(workflow_body "$repo" "${path##*/}")"; then
+			printf '%s\t%s\t\tunknown\tunknown\n' "$repo" "${path##*/}"
+			return
 		fi
-	done
+		if grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' <<<"$body"; then file="${path##*/}"; break; fi
+	done <<<"$listing"
 	if [[ -z "$file" ]]; then printf '%s\t\t\tnot-applicable\tnone\n' "$repo"; return; fi
 	token="$(merge_step_token <<<"$body")"
 	pipelines="$(pipeline_kind "$repo")"
+	if [[ "$pipelines" == unknown ]]; then
+		printf '%s\t%s\t%s\tunknown\tunknown\n' "$repo" "$file" "$token"
+		return
+	fi
 	case "$token" in
 	secrets.GITHUB_TOKEN) [[ "$pipelines" == none ]] && status=suppressed-inert || status=suppressed ;;
 	secrets.*) status=ok ;;
@@ -232,10 +242,14 @@ emit_audit() {
 }
 
 verify_repo() {
-	local repo="$1" cutoff="$2" prs runs pr sha by num verdict
-	prs="$("$GH" pr list --repo "$repo" --state merged --limit 1000 --json number,mergedAt,mergedBy,mergeCommit 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
-	runs="$("$GH" run list --repo "$repo" --event push --branch main --limit 1000 --json headSha 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
-	jq -c --arg since "$cutoff" '.[] | select(.mergedAt >= $since)' <<<"$prs" 2>/dev/null | while IFS= read -r pr; do
+	local repo="$1" cutoff="$2" default_branch prs runs pr sha by num verdict
+	default_branch="$("$GH" repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	[[ -n "$default_branch" ]] || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	prs="$("$GH" pr list --repo "$repo" --state merged --limit 1000 --json number,mergedAt,mergedBy,mergeCommit,baseRefName 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	jq -e 'type == "array"' <<<"$prs" >/dev/null 2>&1 || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	runs="$("$GH" run list --repo "$repo" --event push --branch "$default_branch" --limit 1000 --json headSha 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	jq -e 'type == "array"' <<<"$runs" >/dev/null 2>&1 || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	jq -c --arg since "$cutoff" --arg branch "$default_branch" '.[] | select(.mergedAt >= $since and .baseRefName == $branch)' <<<"$prs" | while IFS= read -r pr; do
 		sha="$(jq -r '.mergeCommit.oid // empty' <<<"$pr")"; by="$(jq -r '.mergedBy.login // "unknown"' <<<"$pr")"; num="$(jq -r .number <<<"$pr")"
 		if jq -e --arg sha "$sha" 'any(.[]; .headSha == $sha)' <<<"$runs" >/dev/null 2>&1; then verdict=cascaded; else verdict=suppressed; fi
 		printf '%s\t#%s\t%s\t%s\t%s\n' "$repo" "$num" "$by" "$verdict" "$sha"
@@ -244,15 +258,22 @@ verify_repo() {
 
 rollout_repo() {
 	local repo="$1" file="$2" status="$3" scratch branch marker open clone_url result
-	[[ "$status" == suppressed || "$status" == suppressed-inert ]] || { echo "$repo: skipped ($status)"; return 0; }
+	case "$status" in
+	suppressed|suppressed-inert) ;;
+	ok|not-applicable) echo "$repo: skipped ($status)"; return 0 ;;
+	*) echo "$repo: failed ($status)"; return 1 ;;
+	esac
 	marker='<!-- catalyst:cat-151-automerge-cascade -->'
-	open="$("$GH" pr list --repo "$repo" --state open --search 'cat-151-automerge-cascade' --json body --jq '.[].body' 2>/dev/null || true)"
+	if ! open="$("$GH" pr list --repo "$repo" --state open --search 'cat-151-automerge-cascade' --json body --jq '.[].body' 2>/dev/null)"; then
+		echo "$repo: failed (dedup probe)"
+		return 1
+	fi
 	grep -qF "$marker" <<<"$open" && { echo "$repo: already-open"; return 0; }
 	if [[ $FIX -eq 0 ]]; then
 		scratch="$(mktemp -d "${TMPDIR:-/tmp}/automerge-dry-run.XXXXXX")" || return 1
 		workflow_body "$repo" "$file" >"$scratch/$file" || { rm -rf "$scratch"; return 1; }
 		echo "$repo: dry-run diff for .github/workflows/$file"
-		patch_workflow "$scratch/$file"
+		patch_workflow "$scratch/$file" || { rm -rf "$scratch"; return 1; }
 		rm -rf "$scratch"
 		return 0
 	fi
@@ -295,7 +316,9 @@ verify|history)
 rollout)
 	bad=0 touched=0
 	for repo in "${REPOS[@]}"; do
-		row="$(classify_repo "$repo")"; IFS=$'\t' read -r _ file _ status _ <<<"$row"
+		row="$(classify_repo "$repo")"
+		file="$(awk -F '\t' '{print $2}' <<<"$row")"
+		status="$(awk -F '\t' '{print $4}' <<<"$row")"
 		if [[ "$status" == suppressed || "$status" == suppressed-inert ]]; then
 			if [[ $LIMIT -gt 0 && $touched -ge $LIMIT ]]; then echo "$repo: skipped (--limit $LIMIT)"; continue; fi
 			touched=$((touched+1))

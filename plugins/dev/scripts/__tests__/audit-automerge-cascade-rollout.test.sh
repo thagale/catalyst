@@ -3,6 +3,10 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"; SUT="$ROOT/plugins/dev/scripts/audit-automerge-cascade.sh"
 S="$(mktemp -d)"; trap 'rm -rf "$S"' EXIT; mkdir -p "$S/f/org/repo"
+if ! python3 -c 'import yaml' >/dev/null 2>&1 && ! command -v ruby >/dev/null 2>&1; then
+	echo 'skip: no YAML parser available (python3/PyYAML or ruby required)'
+	exit 0
+fi
 cat >"$S/f/org/repo/auto-merge.yml" <<'EOF'
 jobs:
   merge:

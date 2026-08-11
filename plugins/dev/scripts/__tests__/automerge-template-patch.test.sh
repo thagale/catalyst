@@ -2,6 +2,10 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"; SUT="$ROOT/plugins/dev/scripts/audit-automerge-cascade.sh"
 S="$(mktemp -d)"; trap 'rm -rf "$S"' EXIT
+if ! python3 -c 'import yaml' >/dev/null 2>&1 && ! command -v ruby >/dev/null 2>&1; then
+	echo 'skip: no YAML parser available (python3/PyYAML or ruby required)'
+	exit 0
+fi
 cat >"$S/workflow.yml" <<'EOF'
 name: Own PRs
 jobs:
@@ -57,7 +61,28 @@ jobs:
           gh pr merge "$PR_URL" --auto --squash
 EOF
 "$SUT" --patch-workflow "$S/two-step.yml" >/dev/null || exit 1
-[[ "$(grep -cF 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$S/two-step.yml")" -eq 1 ]] || exit 1
+[[ "$(grep -cF 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$S/two-step.yml")" -eq 2 ]] || exit 1
+
+# Commands earlier in the same run block retain their initial GH_TOKEN.
+cat >"$S/same-block.yml" <<'EOF'
+jobs:
+  merge:
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit "$PR_URL" --add-label ready
+          gh pr merge "$PR_URL" --auto --squash
+EOF
+"$SUT" --patch-workflow "$S/same-block.yml" >/dev/null || exit 1
+[[ "$(grep -cF 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$S/same-block.yml")" -eq 1 ]] || exit 1
+grep -nF 'gh pr edit' "$S/same-block.yml" | grep -qE '^[0-9]+:' || exit 1
+grep -nF 'export GH_TOKEN=' "$S/same-block.yml" | grep -qE '^[0-9]+:' || exit 1
+
+# A different requested secret is not mistaken for already-current.
+cp "$S/same-block.yml" "$S/rotated.yml"
+"$SUT" --patch-workflow "$S/rotated.yml" --secret-name ROTATED_PAT >/dev/null || exit 1
+grep -qF 'AUTOMERGE_PAT: ${{ secrets.ROTATED_PAT }}' "$S/rotated.yml" || exit 1
 
 # Folded scalars are refused because injected shell newlines would be folded.
 cat >"$S/folded.yml" <<'EOF'
