@@ -370,16 +370,26 @@ export function defaultEscalate(
         { ticket },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
       );
-      if (typeof appendFenceSuppressedEvent === "function") {
+      const marker = join(
+        orchDir,
+        "workers",
+        ticket,
+        ".escalation-fence-suppressed-stale-pr-rescue.applied"
+      );
+      if (!existsSync(marker) && typeof appendFenceSuppressedEvent === "function") {
         try {
-          appendFenceSuppressedEvent({
+          const ok = appendFenceSuppressedEvent({
             ticket,
             site: "stale-pr-rescue",
             host: self,
             reason: "fence-suppressed",
           });
-        } catch {
-          /* best-effort observability */
+          if (ok !== false) writeFileSync(marker, "");
+        } catch (err) {
+          log.warn(
+            { ticket, err: err.message },
+            "cat-3: stale-pr-rescue fence-suppressed emit threw"
+          );
         }
       }
     }

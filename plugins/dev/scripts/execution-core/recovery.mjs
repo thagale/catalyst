@@ -1449,8 +1449,8 @@ export function defaultAppendOperatorEvent(evt) {
         spanId: randomBytes(8).toString("hex"),
         resource: buildCatalystResource({ serviceName: "catalyst.execution-core" }),
         attributes: {
-          "event.name": name,
           ...(evt?.attributes ?? {}),
+          "event.name": name,
         },
         body: { payload: evt?.payload ?? null },
       }) + "\n";
