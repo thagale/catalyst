@@ -27,6 +27,8 @@ import {
   classifyRevivalRoute,
   // CAT-58: the account-usage-cliff test below derives a ring snapshot directly.
   deriveRing,
+  // CAT-159: the shared suppression predicate the anchor-exclusion tests assert on.
+  makeSuppressed,
   makeOwnsFilter,
   resolveRosterSeam,
   // CTL-1552: the parked-by-human label reader + the human-escalated signal check.
@@ -113,6 +115,7 @@ function mkBoard(o = {}) {
   }
   return {
     ticketsById,
+    ...(Object.hasOwn(o, "anchorIssue") ? { anchorIssue: o.anchorIssue } : {}),
     signals: o.signals ?? [],
     eligible: o.eligible ?? [],
     roster: o.roster ?? [],
@@ -200,6 +203,30 @@ describe("isParkedByHuman — descriptor label reader", () => {
   });
   test("case-insensitive on the label name", () => {
     expect(isParkedByHuman({ labels: [{ name: "Parked-By-Human" }] })).toBe(true);
+  });
+});
+
+describe("CAT-159 liveness-anchor board-health suppression", () => {
+  test("suppresses the anchor independently of descriptor labels", () => {
+    const suppressed = makeSuppressed(mkBoard({
+      anchorIssue: "CAT-1",
+      ticketsById: new Map([["CAT-1", { labels: [] }], ["CAT-2", { labels: [] }]]),
+    }));
+    expect(suppressed("CAT-1")).toBe(true);
+    expect(suppressed("CAT-2")).toBe(false);
+  });
+  test("preserves parked-by-human and fails open with no anchor configured", () => {
+    const suppressed = makeSuppressed(mkBoard({ anchorIssue: null, ticketsById: parkedMap("CAT-2") }));
+    expect(suppressed("CAT-1")).toBe(false);
+    expect(suppressed("CAT-2")).toBe(true);
+  });
+  test("a flagged anchor is sanctioned and receives no move", () => {
+    const board = mkBoard({ anchorIssue: "CAT-1", ticketsById: new Map([["CAT-1", { labels: [] }]]) });
+    const invariants = { needsHumanPile: { ok: false, failed: 1, observable: true, flagged: ["CAT-1"], note: "stuck" } };
+    const moves = proposeMoves(invariants, board);
+    expect(moves.tier1).toEqual([]);
+    const decision = decideBoardHealth(invariants, board);
+    expect(decision.sanctioned).toContain("CAT-1");
   });
 });
 
