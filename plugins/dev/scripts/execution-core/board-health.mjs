@@ -37,6 +37,7 @@ import { HEARTBEAT_GRACE_MS, isThrottled, RECONCILE_INTERVAL_MS } from "./config
 import { defaultEmitEvent } from "./recovery-reasoning.mjs"; // → buildRecoveryEnvelope (CTL-1291 promotes the numbers)
 import { evaluateQuotaHeadroom, GITHUB_QUOTA_DEFAULTS } from "./github-quota.mjs";
 import { classifyStallReason } from "./dispatch-skip.mjs";
+import { isKnownPhase } from "../lib/phase-fsm.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 const DEFAULT_THRESHOLDS = {
@@ -679,6 +680,7 @@ export function assembleBoardState({
   const rosterArr = Array.isArray(roster) ? roster : [];
   const latestSkipSignal = new Map();
   for (const signal of signals) {
+    if (!isKnownPhase(signal.phase)) continue;
     const reason = signal.failureReason ?? signal.attentionReason ?? signal.raw?.stalledReason ?? signal.stalledReason;
     if (!reason || !signal.ticket) continue;
     const ts = Date.parse(signal.updatedAt ?? signal.raw?.updatedAt ?? "") || 0;

@@ -27,7 +27,8 @@ function attemptPath(orchDir, ticket) {
 export function readRepullAttempts(orchDir, ticket) {
   try {
     return JSON.parse(readFileSync(attemptPath(orchDir, ticket), "utf8"));
-  } catch {
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
     return { attempts: 0, lastRepullAt: null };
   }
 }

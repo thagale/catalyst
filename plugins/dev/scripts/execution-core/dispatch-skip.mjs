@@ -1,12 +1,11 @@
 import { isKnownPhase } from "../lib/phase-fsm.mjs";
 
-export const OPERATOR_OWNED_STALL_REASONS = Object.freeze(new Set([
-  "needs_human", "escalation-ask-cap", "remediate-cycle-cap-exhausted", "phantom-ticket",
-]));
-export const MACHINE_OWNED_STALL_REASONS = Object.freeze(new Set([
-  "boot-resume-gate-expired", "dispatch-circuit-breaker",
-  "prior-artifact-retry-exhausted", "no-probe-for-phase",
-]));
+export const OPERATOR_OWNED_STALL_REASONS = Object.freeze(
+  new Set(["needs_human", "escalation-ask-cap", "remediate-cycle-cap-exhausted", "phantom-ticket"])
+);
+export const MACHINE_OWNED_STALL_REASONS = Object.freeze(
+  new Set(["boot-resume-gate-expired", "dispatch-circuit-breaker", "no-probe-for-phase"])
+);
 
 export function classifyStallReason(reason) {
   if (typeof reason !== "string" || reason.length === 0) return "unknown";

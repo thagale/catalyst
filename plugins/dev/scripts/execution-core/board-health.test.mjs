@@ -1329,6 +1329,31 @@ describe("assembleBoardState", () => {
     expect(r.workerAge.flagged).toEqual(["CTL-A"]);
   });
 
+  test("dispatch skips ignore non-pipeline recovery inspection signals", () => {
+    const board = assembleBoardState({
+      getWorkerSignals: () => [
+        {
+          ticket: "CTL-A",
+          phase: "implement",
+          status: "stalled",
+          stalledReason: "needs_human",
+          updatedAt: "2026-08-01T00:00:00Z",
+        },
+        {
+          ticket: "CTL-A",
+          phase: "recovery-pass",
+          status: "stalled",
+          stalledReason: "boot-resume-gate-expired",
+          updatedAt: "2026-08-02T00:00:00Z",
+        },
+      ],
+      now: () => NOW,
+    });
+    expect(board.dispatchSkips).toEqual([
+      { ticket: "CTL-A", reason: "needs_human", class: "operator-owned" },
+    ]);
+  });
+
   test("deriveRing: dispatch SUCCESS events set recentDispatchTs; failed/escalated/runaway do NOT", () => {
     const ring = (name) =>
       assembleBoardState({

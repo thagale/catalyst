@@ -7704,7 +7704,10 @@ export function schedulerTick(
       for (const phase of Object.keys(signals)) {
         raw[phase] = readPhaseSignalRaw(orchDir, t.identifier, phase);
       }
-      return { ticket: t.identifier, ...describeSkip({ signals, raw, liveEntries: livePhaseEntries }) };
+      return {
+        ticket: t.identifier,
+        ...describeSkip({ signals, raw, liveEntries: livePhaseEntries }),
+      };
     });
   const skipSummary = summarizeSkips(skips, { cap: HELD_LOG_CAP });
   const readyNow = new Set(ready.map((t) => t.identifier));
@@ -7723,45 +7726,82 @@ export function schedulerTick(
       try {
         const signals = readPhaseSignals(orchDir, skip.ticket);
         const live = livePhaseEntries(signals);
-        const raw = live.map(([phase]) => readPhaseSignalRaw(orchDir, skip.ticket, phase)).filter(Boolean).at(-1);
+        const raw = live
+          .map(([phase]) => readPhaseSignalRaw(orchDir, skip.ticket, phase))
+          .filter(Boolean)
+          .at(-1);
         const dirStat = statSync(join(orchDir, "workers", skip.ticket));
         const attempt = readRepullAttempts(orchDir, skip.ticket);
         const currentMs = now();
-        const backoffOk = attempt.lastRepullAt == null || currentMs - attempt.lastRepullAt >= repullConfig.repullBackoffMs;
+        const backoffOk =
+          attempt.lastRepullAt == null ||
+          currentMs - attempt.lastRepullAt >= repullConfig.repullBackoffMs;
         const verdict = isStalledRepullable({
           signals: Object.fromEntries(live),
           class: skip.class,
-          bgProtected: raw?.bg_job_id ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive) : false,
+          bgProtected: raw?.bg_job_id
+            ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive)
+            : false,
           ageMs: currentMs - dirStat.mtimeMs,
           attempts: attempt.attempts,
           opts: repullConfig,
         });
         if (verdict.ok && backoffOk) {
           if (repullMode === "enforce") {
-            clearStalledLabel(orchDir, skip.ticket, "needs-human", writeStatus);
-            detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
-            recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
-            startedTickets.delete(skip.ticket);
-            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "detached", reason: verdict.reason });
+            clearStalledLabel(orchDir, skip.ticket, "needs-human", writeStatus, {
+              onSettled: (confirmed) => {
+                if (!confirmed) {
+                  appendStalledRepullEvent({
+                    ticket: skip.ticket,
+                    orchId: skip.ticket,
+                    mode: repullMode,
+                    outcome: "label-clear-unconfirmed",
+                    reason: verdict.reason,
+                  });
+                  return;
+                }
+                try {
+                  detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
+                  recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
+                  startedTickets.delete(skip.ticket);
+                  appendStalledRepullEvent({
+                    ticket: skip.ticket,
+                    orchId: skip.ticket,
+                    mode: repullMode,
+                    outcome: "detached",
+                    reason: verdict.reason,
+                  });
+                } catch (error) {
+                  log.warn(
+                    { ticket: skip.ticket, error: String(error) },
+                    "scheduler: confirmed-label stalled repull failed closed (CAT-223)"
+                  );
+                }
+              },
+            });
           } else {
-            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "would-detach", reason: verdict.reason });
+            appendStalledRepullEvent({
+              ticket: skip.ticket,
+              orchId: skip.ticket,
+              mode: repullMode,
+              outcome: "would-detach",
+              reason: verdict.reason,
+            });
           }
         }
       } catch (error) {
-        log.warn({ ticket: skip.ticket, error: String(error) }, "scheduler: stalled repull failed closed (CAT-223)");
+        log.warn(
+          { ticket: skip.ticket, error: String(error) },
+          "scheduler: stalled repull failed closed (CAT-223)"
+        );
       }
     }
   }
 
-  const selected = selectDispatchablePerProject(
-    dispatchableReady,
-    startedTickets,
-    freeSlots,
-    {
-      perProject: concurrency?.perProject,
-      inFlight: inFlightTickets,
-    }
-  );
+  const selected = selectDispatchablePerProject(dispatchableReady, startedTickets, freeSlots, {
+    perProject: concurrency?.perProject,
+    inFlight: inFlightTickets,
+  });
   // CTL-706: per-project slot-usage gauge (dashboarding). log-line-only,
   // matching the cache.stats() per-tick metric convention.
   if (concurrency?.perProject && Object.keys(concurrency.perProject).length > 0) {
@@ -8359,10 +8399,11 @@ export function schedulerTick(
   // in `ready`, so the intended wedge signal is preserved.
   // triagedWaitingReadyCount, NOT triagedWaitingCount — same reason, applied to
   // the other pool: a triaged waiter behind an open dependency is not starved.
-  const hasWaitingWork = hasStarvingWork({
-    readyIds: ready.map((t) => t.identifier),
-    skips,
-  }) || triagedWaitingReadyCount > 0;
+  const hasWaitingWork =
+    hasStarvingWork({
+      readyIds: ready.map((t) => t.identifier),
+      skips,
+    }) || triagedWaitingReadyCount > 0;
   const starvation = nextStarvationState(starvationStreak, {
     didWork,
     freeSlots,
