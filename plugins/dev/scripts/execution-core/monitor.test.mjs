@@ -63,6 +63,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   prevLivenessAnchorIssue = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+  // CAT-159: saving/restoring is not enough — an AMBIENT anchor on the host
+  // running the suite leaks into every startMonitor()/sweepMissingTriage()
+  // default and silently excludes fixture tickets. Clear it; the tests that
+  // exercise the exclusion set it themselves.
+  delete process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-mon-"));
   process.env.CATALYST_DIR = catalystDir;
   mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
