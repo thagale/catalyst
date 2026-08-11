@@ -58,6 +58,9 @@ run() {
     echo "    command: $*"
     echo "    output:"
     sed 's/^/      /' "${SCRATCH}/out"
+    if [[ -f "${SWEEP_SELF_PID_FILE:-}" ]]; then
+      echo "    injected real pids: self=$(cat "$SWEEP_SELF_PID_FILE") ancestor=$(cat "${SWEEP_ANCESTOR_PID_FILE:-/nonexistent}" 2>/dev/null)"
+    fi
   fi
 }
 
@@ -1672,21 +1675,23 @@ _ab_clear() {
 }
 
 # ── T67: runaway browser (renderer CPU-pegged, age>min) → daemon+root reaped ──
-# pgrep 'Chrome for Testing' returns root(5001)+helper(5002); only 5001 is a root.
+# Negative assertions in this phase use run_fail, never `! command; true`:
+# the latter discards the assertion's status and makes the test vacuously pass.
+# pgrep 'Chrome for Testing' returns root(5005001)+helper(5005002); only 5005001 is a root.
 _ab_clear
-export AB_CFT="5001 5002"
-export AB_CMD_5001="$AB_ROOT_CMD"; export AB_CPU_5001="1"; export AB_ETIME_5001="20:00"; export AB_PPID_5001="5000"
-export AB_CHILDREN_5001="5002"
-export AB_CMD_5002="$AB_RENDERER_CMD"; export AB_CPU_5002="96"; export AB_ETIME_5002="19:50"; export AB_PPID_5002="5001"
-export AB_CMD_5000="$AB_DAEMON_CMD"; export AB_PPID_5000="1"
+export AB_CFT="5005001 5005002"
+export AB_CMD_5005001="$AB_ROOT_CMD"; export AB_CPU_5005001="1"; export AB_ETIME_5005001="20:00"; export AB_PPID_5005001="5005000"
+export AB_CHILDREN_5005001="5005002"
+export AB_CMD_5005002="$AB_RENDERER_CMD"; export AB_CPU_5005002="96"; export AB_ETIME_5005002="19:50"; export AB_PPID_5005002="5005001"
+export AB_CMD_5005000="$AB_DAEMON_CMD"; export AB_PPID_5005000="1"
 rm -f "$KILL_LOG" "$SCRATCH_OTEL_LOG"
-echo "5000" > "$AB_SOCKDIR/probe.pid"; : > "$AB_SOCKDIR/probe.sock"
+echo "5005000" > "$AB_SOCKDIR/probe.pid"; : > "$AB_SOCKDIR/probe.sock"
 
 run "T67: runaway browser sweep exits 0" bash "$SWEEP"
-run "T67a: owning daemon pid 5000 killed" bash -c "grep -q '5000' '${KILL_LOG}'"
-run "T67b: root browser pid 5001 killed" bash -c "grep -q '5001' '${KILL_LOG}'"
-run "T67c: helper 5002 NOT killed directly (cascades; not a root)" \
-  bash -c "! grep -q '5002' '${KILL_LOG}' 2>/dev/null; true"
+run "T67a: owning daemon pid 5005000 killed" bash -c "grep -qw '5005000' '${KILL_LOG}'"
+run "T67b: root browser pid 5005001 killed" bash -c "grep -qw '5005001' '${KILL_LOG}'"
+run_fail "T67c: helper 5005002 NOT killed directly (cascades; not a root)" \
+  bash -c "grep -qw '5005002' '${KILL_LOG}'"
 run "T67d: emits agent_browser reclaim vector" \
   bash -c "grep -q 'agent_browser' '${SCRATCH_OTEL_LOG}'"
 run "T67e: reaped session sock/pid removed" \
@@ -1694,15 +1699,15 @@ run "T67e: reaped session sock/pid removed" \
 
 # ── T68: young browser, even CPU-pegged → KEPT (min-age guards short bursts) ──
 _ab_clear
-export AB_CFT="5101 5102"
-export AB_CMD_5101="$AB_ROOT_CMD"; export AB_CPU_5101="1"; export AB_ETIME_5101="00:30"; export AB_PPID_5101="5100"
-export AB_CHILDREN_5101="5102"
-export AB_CMD_5102="$AB_RENDERER_CMD"; export AB_CPU_5102="99"; export AB_ETIME_5102="00:20"; export AB_PPID_5102="5101"
-export AB_CMD_5100="$AB_DAEMON_CMD"; export AB_PPID_5100="1"
+export AB_CFT="5005101 5005102"
+export AB_CMD_5005101="$AB_ROOT_CMD"; export AB_CPU_5005101="1"; export AB_ETIME_5005101="00:30"; export AB_PPID_5005101="5005100"
+export AB_CHILDREN_5005101="5005102"
+export AB_CMD_5005102="$AB_RENDERER_CMD"; export AB_CPU_5005102="99"; export AB_ETIME_5005102="00:20"; export AB_PPID_5005102="5005101"
+export AB_CMD_5005100="$AB_DAEMON_CMD"; export AB_PPID_5005100="1"
 rm -f "$KILL_LOG"
 run "T68: young pegged browser sweep exits 0" bash "$SWEEP"
-run "T68a: young browser NOT killed (5100/5101 absent from kill log)" \
-  bash -c "! grep -qE '5100|5101' '${KILL_LOG}' 2>/dev/null; true"
+run_fail "T68a: young browser NOT killed (5005100/5005101 absent from kill log)" \
+  bash -c "grep -qwE '5005100|5005101' '${KILL_LOG}'"
 run "T68b: keep logged for young browser" \
   bash -c "bash '$SWEEP' 2>&1 | grep -qi 'keep agent-browser'"
 
@@ -1713,57 +1718,57 @@ run "T68b: keep logged for young browser" \
 # `dist/daemon.js` topology (CTL-1500 review P2).
 _ab_clear
 AB_DAEMON_09X_CMD="/opt/homebrew/opt/node/bin/node /Users/x/.npm-global/lib/node_modules/agent-browser/dist/daemon.js"
-export AB_CFT="5201"
-export AB_CMD_5201="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5201="0"; export AB_ETIME_5201="05-00:00:00"; export AB_PPID_5201="5200"
-export AB_CMD_5200="$AB_DAEMON_09X_CMD"; export AB_PPID_5200="1"
+export AB_CFT="5005201"
+export AB_CMD_5005201="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5005201="0"; export AB_ETIME_5005201="05-00:00:00"; export AB_PPID_5005201="5005200"
+export AB_CMD_5005200="$AB_DAEMON_09X_CMD"; export AB_PPID_5005200="1"
 rm -f "$KILL_LOG"
 run "T69: 0.9.x leak-with-daemon sweep exits 0" bash "$SWEEP"
-run "T69a: TTL reap kills root 5201" bash -c "grep -q '5201' '${KILL_LOG}'"
-run "T69b: 0.9.x dist/ daemon 5200 recognized + killed (P2)" bash -c "grep -q '5200' '${KILL_LOG}'"
+run "T69a: TTL reap kills root 5005201" bash -c "grep -qw '5005201' '${KILL_LOG}'"
+run "T69b: 0.9.x dist/ daemon 5005200 recognized + killed (P2)" bash -c "grep -qw '5005200' '${KILL_LOG}'"
 
 # ── T69safety: orphaned SHARED-Playwright browser, NO agent-browser daemon → KEPT ─
 # A ms-playwright / playwright_chromiumdev_profile browser reparented to init with no
 # agent-browser-specific anchor could be an UNRELATED Playwright job — never reap it
 # (CTL-1500 review P1). CPU-pegged + ancient so only the ownership gate spares it.
 _ab_clear
-export AB_CFT="5211"
-export AB_CMD_5211="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5211="99"; export AB_ETIME_5211="05-00:00:00"; export AB_PPID_5211="1"
+export AB_CFT="5005211"
+export AB_CMD_5005211="$AB_PLAYWRIGHT_ROOT_CMD"; export AB_CPU_5005211="99"; export AB_ETIME_5005211="05-00:00:00"; export AB_PPID_5005211="1"
 export AB_CMD_1=""   # init has no agent-browser-daemon command
 rm -f "$KILL_LOG"
 run "T69safety: shared-playwright-no-owner sweep exits 0" bash "$SWEEP"
-run "T69safety-a: unowned shared-playwright root 5211 NEVER killed (P1)" \
-  bash -c "! grep -q '5211' '${KILL_LOG}' 2>/dev/null; true"
+run_fail "T69safety-a: unowned shared-playwright root 5005211 NEVER killed (P1)" \
+  bash -c "grep -qw '5005211' '${KILL_LOG}'"
 run "T69safety-b: 'no agent-browser owner' keep logged" \
   bash -c "bash '$SWEEP' 2>&1 | grep -qi 'no agent-browser owner'"
 
 # ── T70: SAFETY — /Applications personal Chrome & unowned CfT are NEVER targets ─
-# 5302: personal Chrome root (no 'for Testing') → rejected by browser-sig.
-# 5303: personal Chrome renderer under /Applications WITH 'for Testing' forced in →
+# 5005302: personal Chrome root (no 'for Testing') → rejected by browser-sig.
+# 5005303: personal Chrome renderer under /Applications WITH 'for Testing' forced in →
 #       rejected by the /Applications hard-exclude.
-# 5304: a "Chrome for Testing" root with NO agent-browser/Playwright ownership
+# 5005304: a "Chrome for Testing" root with NO agent-browser/Playwright ownership
 #       anchor (a human's manual run) → rejected by the ownership requirement.
 # All CPU-pegged + ancient so ONLY the safety gates keep them alive.
 _ab_clear
-export AB_CFT="5302 5303 5304"
-export AB_CMD_5302="$PERSONAL_CHROME_ROOT_CMD"; export AB_CPU_5302="99"; export AB_ETIME_5302="38-00:00:00"; export AB_PPID_5302="1"
-export AB_CMD_5303="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome for Testing Helper (Renderer) --type=renderer"; export AB_CPU_5303="99"; export AB_ETIME_5303="38-00:00:00"; export AB_PPID_5303="1"
-export AB_CMD_5304="/opt/local/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing --user-data-dir=/tmp/manual"; export AB_CPU_5304="99"; export AB_ETIME_5304="38-00:00:00"; export AB_PPID_5304="1"
+export AB_CFT="5005302 5005303 5005304"
+export AB_CMD_5005302="$PERSONAL_CHROME_ROOT_CMD"; export AB_CPU_5005302="99"; export AB_ETIME_5005302="38-00:00:00"; export AB_PPID_5005302="1"
+export AB_CMD_5005303="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome for Testing Helper (Renderer) --type=renderer"; export AB_CPU_5005303="99"; export AB_ETIME_5005303="38-00:00:00"; export AB_PPID_5005303="1"
+export AB_CMD_5005304="/opt/local/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing --user-data-dir=/tmp/manual"; export AB_CPU_5005304="99"; export AB_ETIME_5005304="38-00:00:00"; export AB_PPID_5005304="1"
 rm -f "$KILL_LOG"
 run "T70: safety-scenario sweep exits 0" bash "$SWEEP"
-run "T70a: personal Chrome root 5302 NEVER killed (no 'for Testing')" \
-  bash -c "! grep -q '5302' '${KILL_LOG}' 2>/dev/null; true"
-run "T70b: /Applications 'for Testing' 5303 NEVER killed (app-bundle hard-exclude)" \
-  bash -c "! grep -q '5303' '${KILL_LOG}' 2>/dev/null; true"
-run "T70c: unowned manual CfT 5304 NEVER killed (no ownership anchor)" \
-  bash -c "! grep -q '5304' '${KILL_LOG}' 2>/dev/null; true"
+run_fail "T70a: personal Chrome root 5005302 NEVER killed (no 'for Testing')" \
+  bash -c "grep -qw '5005302' '${KILL_LOG}'"
+run_fail "T70b: /Applications 'for Testing' 5005303 NEVER killed (app-bundle hard-exclude)" \
+  bash -c "grep -qw '5005303' '${KILL_LOG}'"
+run_fail "T70c: unowned manual CfT 5005304 NEVER killed (no ownership anchor)" \
+  bash -c "grep -qw '5005304' '${KILL_LOG}'"
 
 # ── T71: --dry-run reaps nothing (runaway fixture) ───────────────────────────
 _ab_clear
-export AB_CFT="5401 5402"
-export AB_CMD_5401="$AB_ROOT_CMD"; export AB_CPU_5401="1"; export AB_ETIME_5401="30:00"; export AB_PPID_5401="5400"
-export AB_CHILDREN_5401="5402"
-export AB_CMD_5402="$AB_RENDERER_CMD"; export AB_CPU_5402="88"; export AB_ETIME_5402="29:50"; export AB_PPID_5402="5401"
-export AB_CMD_5400="$AB_DAEMON_CMD"; export AB_PPID_5400="1"
+export AB_CFT="5005401 5005402"
+export AB_CMD_5005401="$AB_ROOT_CMD"; export AB_CPU_5005401="1"; export AB_ETIME_5005401="30:00"; export AB_PPID_5005401="5005400"
+export AB_CHILDREN_5005401="5005402"
+export AB_CMD_5005402="$AB_RENDERER_CMD"; export AB_CPU_5005402="88"; export AB_ETIME_5005402="29:50"; export AB_PPID_5005402="5005401"
+export AB_CMD_5005400="$AB_DAEMON_CMD"; export AB_PPID_5005400="1"
 rm -f "$KILL_LOG"
 run "T71: dry-run kills nothing" \
   bash -c "bash '$SWEEP' --dry-run && ! test -s '${KILL_LOG}'"
@@ -1772,11 +1777,12 @@ run "T71b: dry-run logs would-reap" \
 
 # ── T72: crashpad handler is never treated as a root (harmless leftover) ──────
 _ab_clear
-export AB_CFT="5601"
-export AB_CMD_5601="$AB_CRASHPAD_CMD"; export AB_CPU_5601="0"; export AB_ETIME_5601="10-00:00:00"; export AB_PPID_5601="1"
+export AB_CFT="5005601"
+export AB_CMD_5005601="$AB_CRASHPAD_CMD"; export AB_CPU_5005601="0"; export AB_ETIME_5005601="10-00:00:00"; export AB_PPID_5005601="1"
 rm -f "$KILL_LOG"
-run "T72: crashpad handler not reaped (excluded from roots)" \
-  bash -c "bash '$SWEEP' && ! grep -q '5601' '${KILL_LOG}' 2>/dev/null; true"
+run "T72: crashpad sweep exits 0" bash "$SWEEP"
+run_fail "T72a: crashpad handler not reaped (excluded from roots)" \
+  bash -c "grep -qw '5005601' '${KILL_LOG}'"
 
 # ── T73: stale sock/pid housekeeping (dead pid removed, live pid kept) ────────
 _ab_clear
@@ -1791,11 +1797,11 @@ run "T73: stale sock/pid housekeeping" bash -c '
 
 # ── T74: kill-switch — SWEEP_AB_ENABLED=0 disables the whole vector ──────────
 _ab_clear
-export AB_CFT="5501 5502"
-export AB_CMD_5501="$AB_ROOT_CMD"; export AB_CPU_5501="99"; export AB_ETIME_5501="99:00"; export AB_PPID_5501="5500"
-export AB_CHILDREN_5501="5502"
-export AB_CMD_5502="$AB_RENDERER_CMD"; export AB_CPU_5502="99"; export AB_ETIME_5502="98:00"; export AB_PPID_5502="5501"
-export AB_CMD_5500="$AB_DAEMON_CMD"; export AB_PPID_5500="1"
+export AB_CFT="5005501 5005502"
+export AB_CMD_5005501="$AB_ROOT_CMD"; export AB_CPU_5005501="99"; export AB_ETIME_5005501="99:00"; export AB_PPID_5005501="5005500"
+export AB_CHILDREN_5005501="5005502"
+export AB_CMD_5005502="$AB_RENDERER_CMD"; export AB_CPU_5005502="99"; export AB_ETIME_5005502="98:00"; export AB_PPID_5005502="5005501"
+export AB_CMD_5005500="$AB_DAEMON_CMD"; export AB_PPID_5005500="1"
 rm -f "$KILL_LOG"
 run "T74: SWEEP_AB_ENABLED=0 reaps nothing" \
   bash -c "SWEEP_AB_ENABLED=0 bash '$SWEEP' && ! test -s '${KILL_LOG}'"
@@ -1822,6 +1828,20 @@ rm -f "$MOCKBIN/pgrep" "$MOCKBIN/ps"
 # Hermetic: ps, lsof, pgrep and kill are all mocked — NO real process is ever
 # enumerated or signalled. `env kill` resolves through $MOCKBIN, which only
 # appends to $KILL_LOG.
+#
+# CTL-1701 — SYNTHETIC PIDS ARE >= 5,000,000, AND MUST STAY THERE.
+# The `-axo` ps mock below ALSO emits two rows derived from its own REAL ancestor
+# chain (the sweep's $$ and a far ancestor) so that self/ancestor protection is
+# observable. Those are real pids. When a synthetic fixture pid aliased one of
+# them, orphan-sweep.sh correctly SPARED the fixture and every exact-count
+# assertion in this phase reported "expected N, got N-1" — green on macOS (pids
+# ~30-90k), red on Linux CI (pids in the hundreds/low thousands).
+# Linux PID_MAX_LIMIT is 2^22 = 4,194,304 and macOS pids wrap at 99,999, so a pid
+# >= 5,000,000 can never be real on either platform and the two populations are
+# disjoint BY CONSTRUCTION rather than by luck. The 500-prefix keeps the original
+# case id readable (2101 -> 5002101). Do not reintroduce a pid below that floor;
+# synthetic-pid-floor.test.sh enforces the invariant across the shared fixtures.
+# Narrative: thoughts/shared/learnings/2026-08-11-synthetic-fixture-pids-must-not-alias-real-pids.md
 
 WIDEN_WT="${SCRATCH}/wt_widen"
 mkdir -p "${WIDEN_WT}/CTL-999"          # a LIVE worktree
@@ -2048,6 +2068,30 @@ _widen_clear() {
   rm -f "${WIDEN_MOCK_STATE}"/* 2>/dev/null || true
 }
 
+# Both synthetic populations are kept disjoint from the real ancestry rows that
+# the ps mock deliberately injects. The static Phase-10 list keeps the runtime
+# precondition covering that vector after its environment has been cleared.
+AB_PHASE10_FIXTURE_PIDS="5005000 5005001 5005002 5005100 5005101 5005102 5005200 5005201 5005211 5005302 5005303 5005304 5005400 5005401 5005402 5005500 5005501 5005502 5005601"
+export AB_PHASE10_FIXTURE_PIDS
+
+_widen_assert_disjoint() {
+  local real_file real_pid fixture role
+  for real_file in "${SWEEP_SELF_PID_FILE:-}" "${SWEEP_ANCESTOR_PID_FILE:-}"; do
+    [[ -s "$real_file" ]] || continue
+    real_pid="$(cat "$real_file")"
+    role="self"
+    [[ "$real_file" == "${SWEEP_ANCESTOR_PID_FILE:-}" ]] && role="ancestor"
+    for fixture in ${WIDEN_FIXTURE_PIDS:-} ${AB_PHASE10_FIXTURE_PIDS:-}; do
+      if [[ "$fixture" == "$real_pid" ]]; then
+        echo "PRECONDITION VIOLATED: synthetic fixture pid ${fixture} collides with real ${role} pid ${real_pid}" >&2
+        echo "  (CTL-1701 floor is >= 5000000 — see the Phase 11 header)" >&2
+        return 1
+      fi
+    done
+  done
+}
+export -f _widen_assert_disjoint
+
 # ── the full fixture: one row per behavior under test ────────────────────────
 _widen_fixture() {
   _widen_clear
@@ -2138,6 +2182,16 @@ export WIDEN_ANCESTOR_PROBE=1  # T82/T89/T89b need real self/ancestor discovery
 rm -f "$SCRATCH_OTEL_LOG"
 run "T75: widened sweep (enforce) exits 0" \
   _sweep_enforce_with_ancestor_retry
+if ! _widen_assert_disjoint; then
+  FAILURES=$((FAILURES+1))
+  echo "  FAIL: T75 precondition: synthetic fixtures are disjoint from injected real pids"
+fi
+
+echo "5002001" > "${SCRATCH}/collision-self.pid"
+run_fail "T-collision: disjointness precondition rejects an aliased fixture pid" \
+  bash -c "SWEEP_SELF_PID_FILE='${SCRATCH}/collision-self.pid' SWEEP_ANCESTOR_PID_FILE='${SCRATCH}/collision-ancestor.pid' WIDEN_FIXTURE_PIDS='5002001' _widen_assert_disjoint > '${SCRATCH}/out-collision' 2>&1"
+run "T-collision-msg: the rejection names the colliding pid" \
+  bash -c "grep -q 'synthetic fixture pid 5002001 collides with real self pid 5002001' '${SCRATCH}/out-collision'"
 
 run "T75a: bare-sh orphan w/ DELETED cwd under wt root IS killed" \
   bash -c "grep -qw '2001' '${KILL_LOG}'"
