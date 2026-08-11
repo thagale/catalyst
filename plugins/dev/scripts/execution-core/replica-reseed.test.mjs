@@ -3,6 +3,11 @@ import { decideReseed, requestReplicaReseed } from "./replica-reseed.mjs";
 const NOW = 1_786_000_000_000; const empty = { state: "empty", issueRows: 0 };
 const ctx = (over = {}) => ({ agentInstalled: true, tokenPresent: true, lastAttemptMs: null, now: NOW, ...over });
 describe("replica reseed", () => {
+  test("off and skip paths have zero side effects", () => {
+    const calls = []; const deps = { kickstart: () => calls.push("kick"), emit: () => calls.push("emit"), writeMarker: () => calls.push("marker"), log: { info: () => calls.push("log") } };
+    expect(requestReplicaReseed({ mode: "off", completeness: empty, ctx: ctx(), ...deps }).outcome).toBe("off"); expect(calls).toEqual([]);
+    expect(requestReplicaReseed({ mode: "enforce", completeness: empty, ctx: ctx({ tokenPresent: false }), ...deps }).outcome).toBe("skipped"); expect(calls).toEqual(["log"]);
+  });
   test("only absent or empty replicas request reseed", () => {
     expect(decideReseed(empty, ctx()).action).toBe("request"); expect(decideReseed({ state: "absent" }, ctx()).action).toBe("request");
     for (const state of ["ok", "partial", "stale"]) expect(decideReseed({ state, issueRows: 3 }, ctx())).toMatchObject({ action: "skip", reason: "already-populated" });

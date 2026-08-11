@@ -8,7 +8,7 @@ import { listProjects } from "./registry.mjs";
 export const DEFAULTS = { intervalSeconds: 300 };
 const SQLITE_MAGIC = "SQLite format 3\0";
 
-function defaultProbe(dbPath) {
+export function defaultProbe(dbPath) {
   if (!existsSync(dbPath)) return { dbPresent: false };
   const out = { dbPresent: true, sizeBytes: null, isSqlite: false, tables: null, issueRows: null, teams: null, cursor: null, lockMtimeMs: null };
   try { out.sizeBytes = statSync(dbPath).size; } catch { /* unreadable */ }
