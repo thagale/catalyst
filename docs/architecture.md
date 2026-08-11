@@ -1,5 +1,11 @@
 # Architecture
 
+## Replica completeness chain
+
+Linear replica completeness follows a sampler → atomic `replica-state.json` snapshot → board-health
+invariant chain. The daemon primes the snapshot before the first scan. Empty or absent replicas feed
+a shadow-first, cooldown-bounded boot reseed decision; populated replicas are never actuated.
+
 For the local Linear writer, freshness gate, read tiers, configuration order, and health signals,
 see [Linear read replica](linear-replica.md).
 
@@ -358,6 +364,15 @@ dispatch cooldown and a node-local `.lane-cooldowns/bg.json` marker carry the re
 that lane marker is active, phase-aware dispatch routes `bg` work to `codex-exec` when its boot gate
 is healthy and emits an audit-only fallback event. Account rate-limit samples also derive the board
 health `nearCliff` invariant from five-hour and seven-day utilization (90% by default).
+
+### Operational liveness-anchor exclusion
+
+The Linear issue configured by `catalyst.cluster.livenessAnchorIssue` is a durable heartbeat
+bulletin board, not pipeline work. `dispatch-exclusions.mjs` identifies it, and execution-core
+excludes it at all three action boundaries: `dispatch-readiness.mjs:canOccupySlotNow` for new-work
+admission, `monitor.mjs:dispatchTriage` (plus the `sweepMissingTriage` candidate filter) for triage,
+and `board-health.mjs:makeSuppressed` for recovery moves. The exclusion fails open when the
+machine-local key is unset or unreadable, so no unidentified work ticket is suppressed.
 
 ### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707 + CAT-31)
 
