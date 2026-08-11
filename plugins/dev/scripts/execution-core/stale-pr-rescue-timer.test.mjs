@@ -1253,11 +1253,15 @@ describe("defaultEscalate fence-suppressed event", () => {
   it("does not emit for a missing Linear transport", () => {
     dir = mkdtempSync(join(tmpdir(), "stale-pr-no-transport-"));
     const events = [];
-    defaultEscalate("CAT-3", {}, {
-      orchDir: dir,
-      linearWrite: null,
-      appendFenceSuppressedEvent: (event) => events.push(event),
-    });
+    defaultEscalate(
+      "CAT-3",
+      {},
+      {
+        orchDir: dir,
+        linearWrite: null,
+        appendFenceSuppressedEvent: (event) => events.push(event),
+      },
+    );
     expect(events).toHaveLength(0);
   });
 });
