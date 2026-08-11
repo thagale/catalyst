@@ -299,13 +299,32 @@ function dedupeFlagged(invariants) {
 export function makeOwnsFilter(board, { scope = "raw" } = {}) {
   const multiHost = !!(board?.multiHost && typeof board?.ownerForTicket === "function");
   const roster = scope === "dispatch"
-    ? (board?.dispatchRoster ?? board?.roster ?? [])
+    ? dispatchRosterOf(board)
     : (board?.roster ?? []);
   return (ticket) => {
     if (!multiHost) return true;
     try { return board.ownerForTicket(ticket, roster) === board.self; }
     catch { return true; }
   };
+}
+
+function dispatchRosterOf(board) {
+  return board?.dispatchRoster ?? board?.roster ?? [];
+}
+
+function isAdvanceable(board, _id, d) {
+  if (isTerminalLinearState(d)) return false;
+  const status = String(d?.status ?? "").toLowerCase();
+  if (NEEDS_HUMAN_STATUSES.has(status)) return false;
+  const labels = labelsOf(d);
+  if (labels && labels.some((l) => NEEDS_HUMAN_LABEL_RE.test(labelName(l)))) return false;
+  if (isParkedByHuman(d)) return false;
+  for (const blockerId of extractBlockers(d)) {
+    const blocker = board.ticketsById?.get(blockerId);
+    const state = blocker ? (blocker.state ?? blocker.linear_state ?? null) : null;
+    if (!(state != null && BLOCKER_DONE_RE.test(String(state)))) return false;
+  }
+  return true;
 }
 
 // HRW share tally for new CAT-57 consumers. checkStrandedNode deliberately keeps
@@ -323,11 +342,10 @@ function ownedTicketsByHost(board) {
       // tickets are not part of the share. BLOCKER_DONE_RE (not TERMINAL_STATUSES)
       // is the right matcher here: these are Linear STATE names, and it is the one
       // that covers cancelled/duplicate as well as done/complete/merged.
-      const state = d?.state ?? d?.linear_state ?? null;
-      if (state && BLOCKER_DONE_RE.test(String(state))) continue;
+      if (!isAdvanceable(board, id, d)) continue;
       // Productivity describes each peer's dispatchable share, so use the same
       // liveness-filtered roster that dispatch admission uses.
-      const host = board.ownerForTicket(id, board.dispatchRoster ?? board.roster);
+      const host = board.ownerForTicket(id, dispatchRosterOf(board));
       if (!host) continue;
       const ids = out.get(host) ?? [];
       ids.push(id);
@@ -455,7 +473,7 @@ export function resolveDeadHosts(deadHosts) {
 export function resolveRosterSeam(value, fallback) {
   try {
     const resolved = typeof value === "function" ? value() : value;
-    return Array.isArray(resolved) ? resolved : fallback;
+    return Array.isArray(resolved) && resolved.length > 0 ? resolved : fallback;
   } catch {
     return fallback;
   }
@@ -741,6 +759,10 @@ function checkCacheCoherence(b) {
 function checkDispatchLiveness(b, t) {
   const free = b.capacity.freeSlots;
   const owns = makeOwnsFilter(b, { scope: "dispatch" });
+  const dispatchRoster = dispatchRosterOf(b);
+  if (b?.multiHost && typeof b?.ownerForTicket === "function" && dispatchRoster.length === 0) {
+    return invariant(true, 0, false, [], "empty dispatch roster → ownership unresolvable, not observable");
+  }
   const ownedEligible = b.eligible.filter((e) => owns(e.id));
   const queuedTotal = b.eligible.length;
   const queued = ownedEligible.length;
@@ -941,7 +963,7 @@ function checkNodeProductivity(b, t) {
     }
   }
   const note = flagged.length
-    ? `${flagged.length} live owning node(s) have not advanced work past a phase boundary`
+    ? `${flagged.length} live node(s) owning advanceable work have not advanced past a phase boundary`
     : "all known live owning peers are productive";
   // CAT-57 (Codex P1): shadow must still REPORT what it detected. Passing [] here
   // erased the populated `flagged` set, and both telemetry sinks derive from it —
