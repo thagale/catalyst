@@ -3,22 +3,18 @@
 # Each function prints FAIL: … to stderr on violation and returns non-zero.
 # bash-3.2 safe: no mapfile, no associative arrays.
 
-# Portable file-mode reader (BSD stat vs GNU stat).
-_shc_file_mode() {
-	stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
-}
+source "${BASH_SOURCE[0]%/*}/portable-stat.sh"
 
 # check_secret_file_modes [config_dir]
 # Fail if any config_dir/config*.json is group/other readable (perm bits & 077 set).
 check_secret_file_modes() {
 	local config_dir="${1:-${CATALYST_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst}}"
-	local rc=0 mode f
+	local rc=0 mode oct f
 	for f in "${config_dir}"/config*.json; do
 		[[ -f "$f" ]] || continue
-		mode="$(_shc_file_mode "$f")"
-		# Check if group or other bits are set (last two octal digits != 00)
-		local last2="${mode#?}"  # strip leading digit (owner)
-		if [[ "$last2" != "00" ]]; then
+		mode="$(portable_stat_mode "$f")" || continue
+		oct="$(portable_stat_mode_oct "$f")" || continue
+		if (( (oct & 63) != 0 )); then
 			echo "FAIL: ${f} is mode ${mode} (expected 600, group/other readable)" >&2
 			rc=1
 		fi
