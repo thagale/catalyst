@@ -600,7 +600,11 @@ confirmed label application:
 New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
 `escalation.fence-suppressed`, `delegate.would-route`, `delegate.routed`,
 `delegate.route-fallback`. A fence suppression is a deliberate no-write;
-`escalation.fence-suppressed` makes that decision operator-visible instead of silent.
+`escalation.fence-suppressed` makes that decision operator-visible instead of silent. It emits at
+most once per `(ticket, site)` during `CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS` (15 minutes by
+default) and fails open when its marker is absent or malformed. Scheduler Pass 4 reaps
+`orchDir/.fence-suppressed-emits/` with a TTL equal to that window, so raising the emission window
+also raises marker retention.
 
 ### Runaway-loop guards (CTL-671)
 
