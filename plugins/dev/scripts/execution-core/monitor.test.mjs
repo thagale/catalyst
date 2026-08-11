@@ -2882,6 +2882,29 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
 
   const fakeOrchDir = "/fake-orch-862";
 
+  test("liveness anchor is refused before HRW, claims, counters, budget, and launch", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = mock(() => ({ won: true, generation: 1 }));
+    const bumpFenceTriageAttempt = mock(() => 1);
+    const budget = { remaining: 2 };
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OTHER,
+      survivingRosterOverride: ROSTER,
+      claimDispatch,
+      bumpFenceTriageAttempt,
+      triageBudget: budget,
+      anchorIssue: TICKET,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch).not.toHaveBeenCalled();
+    expect(bumpFenceTriageAttempt).not.toHaveBeenCalled();
+    expect(budget.remaining).toBe(2);
+  });
+
   test("single-host roster is an exact no-op: claim NEVER attempted, dispatch proceeds", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));

@@ -50,6 +50,7 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { isLivenessAnchorTicket } from "./dispatch-exclusions.mjs";
 import { claimDispatchSync, readTriageAttemptCountSync, bumpTriageAttemptCountSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
@@ -537,6 +538,7 @@ export function handleStateChangedEvent(
     claimDispatch = claimDispatchSync,
     // CTL-1095: drain gate seam — thread through to dispatchTriage.
     isDraining = (dir) => isDrainingDefault(dir),
+    anchorIssue = undefined,
     // CTL-1367 P1: failed-terminal backstop for a rejected async (sdk) triage
     // dispatch — threaded through to dispatchTriage (undefined → real default).
     emitBackstop,
@@ -589,6 +591,7 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          anchorIssue,
           survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
@@ -648,6 +651,7 @@ export function handleStateChangedEvent(
           applyAssignee,
           hosts,
           hostName,
+          anchorIssue,
           survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
@@ -783,6 +787,7 @@ function dispatchTriage(
     // multi-host triage claim (same gate as emitFenceClaimed). Injectable so
     // tests drive/assert the stamp without touching Linear.
     stampWorkerLabel = defaultStampWorkerLabel,
+    anchorIssue = undefined,
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
     // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) triage
@@ -848,6 +853,16 @@ function dispatchTriage(
   // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
   if (isDraining(orchDir)) {
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
+    return false;
+  }
+  // CAT-159: sibling correctness gate to dispatch-readiness.mjs's new-work
+  // admission check. It precedes HRW and all budget/counter side effects so
+  // every host refuses the configured operational anchor consistently.
+  if (isLivenessAnchorTicket(identifier, { anchorIssue })) {
+    log.debug(
+      { identifier },
+      "cat-159: skipping triage dispatch for catalyst.cluster.livenessAnchorIssue"
+    );
     return false;
   }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call
@@ -1435,6 +1450,7 @@ export function sweepMissingTriage({
   runTriageState = defaultRunTriageStateQuery,
   // CTL-1589 (Codex R2): live-state read for stale-row revalidation; injectable.
   fetchLiveState = defaultFetchTicketState,
+  anchorIssue = undefined,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -1478,6 +1494,9 @@ export function sweepMissingTriage({
     for (const t of candidates) {
       if (seen.has(t.identifier)) continue;
       seen.add(t.identifier);
+      // Redundant with dispatchTriage by design: the gate is correctness; this
+      // filter avoids reconsidering the permanent anchor on every sweep.
+      if (isLivenessAnchorTicket(t.identifier, { anchorIssue })) continue;
       // Codex R4: at a saturated fleet, still ROUTE capped tickets (their park is
       // capacity-independent and dispatchTriage's cap gate runs before its
       // budget gate); everything else waits for the next sweep.
@@ -1517,6 +1536,7 @@ export function sweepMissingTriage({
         emitBackstop, // CTL-1367 P1
         ...(labelNeedsHuman ? { labelNeedsHuman } : {}), // CTL-1441
         stampWorkerLabel, // CTL-1481
+        anchorIssue,
       });
     }
   }
