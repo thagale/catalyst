@@ -12,7 +12,9 @@ cpi_pid_gone() {
   local pid="$1" state
   kill -0 "$pid" 2>/dev/null || return 0
   command -v ps >/dev/null 2>&1 || return 1
-  state="$(ps -o state= -p "$pid" 2>/dev/null)" || return 0
+  # kill -0 just proved the pid existed. If ps now fails, that may be a race
+  # with exit or a permission/tool failure; neither proves death, so fail closed.
+  state="$(ps -o state= -p "$pid" 2>/dev/null)" || return 1
   state="${state//[[:space:]]/}"
   [[ -z "$state" ]] && return 0
   case "$state" in [Zz]*) return 0 ;; *) return 1 ;; esac

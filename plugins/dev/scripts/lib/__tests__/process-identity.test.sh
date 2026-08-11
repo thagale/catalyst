@@ -23,7 +23,7 @@ cpi_pid_is_ours "$unrelated" 'definitely-not-sleep' && bad "identity rejects unr
 mkdir "$tmp/bin"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$tmp/bin/ps"
 chmod +x "$tmp/bin/ps"
-PATH="$tmp/bin:$PATH" cpi_pid_is_ours "$unrelated" sleep && bad "identity fails closed when ps fails" || ok "identity fails closed when ps fails"
+(PATH="$tmp/bin:$PATH"; cpi_pid_is_ours "$unrelated" sleep) && bad "identity fails closed when ps fails" || ok "identity fails closed when ps fails"
 
 cpi_pid_gone "$unrelated" && bad "live pid is not gone" || ok "live pid is not gone"
 cpi_pid_gone 5999999 && ok "nonexistent pid is gone" || bad "nonexistent pid is gone"
@@ -32,7 +32,10 @@ self_matches="$(cpi_find_orphans "process-identity.test.sh" || true)"
 [[ " $self_matches " == *" $$ "* ]] && bad "orphan scan excludes caller" || ok "orphan scan excludes caller"
 
 marker="cpi-marker-$PPID-$$"
-bash -c 'exec -a "$1" sleep 30' _ "$marker" & marked=$!; children="$children $marked"
+marker_script="$tmp/$marker.sh"
+printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$marker_script"
+chmod +x "$marker_script"
+bash "$marker_script" & marked=$!; children="$children $marked"
 sleep 0.1
 found="$(cpi_find_orphans "$marker")"
 [[ "$found" == "$marked" ]] && ok "orphan scan finds exactly marker process" || bad "orphan scan finds exactly marker process (got: $found)"

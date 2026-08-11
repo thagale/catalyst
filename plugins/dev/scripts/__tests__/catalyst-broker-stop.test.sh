@@ -8,7 +8,7 @@ bad() { echo "  FAIL: $1 ($2)"; failures=$((failures + 1)); }
 tmp="$(mktemp -d)"; export CATALYST_DIR="$tmp"
 marker="cat163-broker-$PPID-$$"
 marker_script="$tmp/$marker-broker-index.mjs"
-printf '#!/usr/bin/env bash\nsleep 30\n' > "$marker_script"; chmod +x "$marker_script"
+printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$marker_script"; chmod +x "$marker_script"
 export BROKER_PROC_PATTERN="$marker"
 cleanup() { local p; for p in $children; do kill -9 "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done; rm -rf "$tmp"; }
 trap cleanup EXIT

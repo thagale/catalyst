@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"; CLI="$ROOT/plu
 failures=0; children=""; ok(){ echo "  PASS: $1"; }; bad(){ echo "  FAIL: $1 ($2)"; failures=$((failures+1)); }
 tmp="$(mktemp -d)"; export CATALYST_DIR="$tmp" CATALYST_SKIP_DEP_PREFLIGHT=1
 marker="cat163-execution-core-$PPID-$$"; marker_script="$tmp/$marker-daemon.mjs"
-printf '#!/usr/bin/env bash\nsleep 30\n' > "$marker_script"; chmod +x "$marker_script"; export EXECUTION_CORE_PROC_PATTERN="$marker"
+printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$marker_script"; chmod +x "$marker_script"; export EXECUTION_CORE_PROC_PATTERN="$marker"
 cleanup(){ local p; for p in $children; do kill -9 "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done; rm -rf "$tmp"; }; trap cleanup EXIT
 spawn(){ bash "$marker_script" & SPAWNED=$!; children="$children $SPAWNED"; sleep 0.1; }
 
