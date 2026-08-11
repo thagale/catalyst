@@ -323,7 +323,16 @@ function defaultDispatchRescue(ticket, opts) {
 export function defaultEscalate(
   ticket,
   detail,
-  { orchDir, linearWrite, multiHost = false, gateway = undefined, self = undefined, env = process.env, maxParallel = undefined } = {}
+  {
+    orchDir,
+    linearWrite,
+    multiHost = false,
+    gateway = undefined,
+    self = undefined,
+    env = process.env,
+    maxParallel = undefined,
+    appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent,
+  } = {}
 ) {
   let routed = false;
   let labelled = false;
@@ -361,6 +370,18 @@ export function defaultEscalate(
         { ticket },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
       );
+      if (typeof appendFenceSuppressedEvent === "function") {
+        try {
+          appendFenceSuppressedEvent({
+            ticket,
+            site: "stale-pr-rescue",
+            host: self,
+            reason: "fence-suppressed",
+          });
+        } catch {
+          /* best-effort observability */
+        }
+      }
     }
   } else {
     log.warn(
@@ -433,6 +454,11 @@ function defaultEmit(name, payload) {
   } catch {
     /* best-effort */
   }
+}
+
+function defaultAppendFenceSuppressedEvent(payload) {
+  defaultEmit("escalation.fence-suppressed", payload);
+  return true;
 }
 
 /**

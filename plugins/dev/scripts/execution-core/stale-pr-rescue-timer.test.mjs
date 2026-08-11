@@ -11,7 +11,41 @@ import {
   buildRescueDispatchArgs,
   defaultMergeTree,
   defaultLinearWrite,
+  defaultEscalate,
 } from "./stale-pr-rescue-timer.mjs";
+
+describe("defaultEscalate fence-suppressed event", () => {
+  let dir;
+  afterEach(() => { if (dir) rmSync(dir, { recursive: true, force: true }); });
+
+  it("emits only for a fence suppression and preserves the outcome", () => {
+    dir = mkdtempSync(join(tmpdir(), "stale-pr-fence-"));
+    mkdirSync(join(dir, "workers", "CAT-3"), { recursive: true });
+    writeFileSync(join(dir, "workers", "CAT-3", "cluster-generation.json"), JSON.stringify({ generation: 1 }));
+    const events = [];
+    const outcome = defaultEscalate("CAT-3", {}, {
+      orchDir: dir,
+      linearWrite: { applyLabel: () => ({ applied: true }) },
+      multiHost: true,
+      self: "host-a",
+      gateway: { escalate: () => ({ current: false }) },
+      appendFenceSuppressedEvent: (event) => events.push(event),
+    });
+    expect(outcome).toEqual({ confirmed: false, routed: false, reason: "fence-suppressed" });
+    expect(events).toEqual([{ ticket: "CAT-3", site: "stale-pr-rescue", host: "host-a", reason: "fence-suppressed" }]);
+  });
+
+  it("does not emit for a missing Linear transport", () => {
+    dir = mkdtempSync(join(tmpdir(), "stale-pr-no-transport-"));
+    const events = [];
+    defaultEscalate("CAT-3", {}, {
+      orchDir: dir,
+      linearWrite: null,
+      appendFenceSuppressedEvent: (event) => events.push(event),
+    });
+    expect(events).toHaveLength(0);
+  });
+});
 import * as linearWriteModule from "./linear-write.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
