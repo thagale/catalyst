@@ -315,10 +315,9 @@ export function parseBranchArgs(argv) {
   return out;
 }
 
-function writeOut(text) {
+export function writeOut(text, stdout = process.stdout) {
   return new Promise((resolve, reject) => {
-    const flushed = process.stdout.write(text, (err) => (err ? reject(err) : resolve()));
-    if (flushed) resolve();
+    stdout.write(text, (err) => (err ? reject(err) : resolve()));
   });
 }
 
