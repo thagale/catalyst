@@ -53,16 +53,38 @@ render_template() {
 }
 
 patch_workflow() {
-	local file="$1" tmp actor_if
+	local file="$1" tmp
 	grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' "$file" || { echo refused; return 3; }
-	tmp="$(mktemp "${TMPDIR:-/tmp}/automerge-template.XXXXXX")" || return 3
-	render_template >"$tmp" || { rm -f "$tmp"; return 3; }
-	# Preserve a stricter source job gate, notably auto-merge-own-prs.yml.
-	actor_if="$(grep -E '^[[:space:]]+if:.*github\.actor' "$file" | head -1 || true)"
-	if [[ -n "$actor_if" ]]; then
-		awk -v repl="$actor_if" '/^[[:space:]]+if: github.event.pull_request.draft == false$/ {$0=repl} {print}' "$tmp" >"${tmp}.gate"
-		mv "${tmp}.gate" "$tmp"
+	if grep -qF 'AUTOMERGE_PAT: ${{ secrets.' "$file" &&
+		grep -qF '::warning title=Auto-merge cascade suppressed::' "$file"; then
+		echo already-current
+		return 0
 	fi
+	tmp="$(mktemp "${TMPDIR:-/tmp}/automerge-template.XXXXXX")" || return 3
+	# Modify only the merge step. Repository-specific triggers, authorization
+	# gates, dependencies, permissions, and adjacent steps are security policy.
+	awk -v secret="$SECRET_NAME" '
+		/GH_TOKEN:[[:space:]]*\$\{\{[[:space:]]*secrets\.GITHUB_TOKEN[[:space:]]*\}\}/ {
+			match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH)
+			print indent "# CAT-151: GITHUB_TOKEN merges do not start downstream workflows."
+			print indent "AUTOMERGE_PAT: ${{ secrets." secret " }}"
+			print indent "FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
+			next
+		}
+		/gh[[:space:]]+pr[[:space:]]+merge/ {
+			match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH); cmd=$0; sub(/^[[:space:]]*/, "", cmd)
+			print indent "set -euo pipefail"
+			print indent "if [ -n \"${AUTOMERGE_PAT}\" ]; then"
+			print indent "  export GH_TOKEN=\"${AUTOMERGE_PAT}\""
+			print indent "else"
+			print indent "  echo \"::warning title=Auto-merge cascade suppressed::" secret " is not available to this run; merging with GITHUB_TOKEN. Downstream push / workflow_run pipelines will NOT fire (CAT-151).\""
+			print indent "  export GH_TOKEN=\"${FALLBACK_TOKEN}\""
+			print indent "fi"
+			print indent cmd
+			next
+		}
+		{print}
+	' "$file" >"$tmp"
 	if cmp -s "$file" "$tmp"; then rm -f "$tmp"; echo already-current; return 0; fi
 	if [[ $FIX -eq 1 || -n "$PATCH_FILE" ]]; then mv "$tmp" "$file"; echo patched; else diff -u "$file" "$tmp" || true; rm -f "$tmp"; echo would-patch; fi
 }
@@ -158,8 +180,8 @@ emit_audit() {
 
 verify_repo() {
 	local repo="$1" cutoff="$2" prs runs pr sha by num verdict
-	prs="$("$GH" pr list --repo "$repo" --state merged --limit 100 --json number,mergedAt,mergedBy,mergeCommit 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
-	runs="$("$GH" run list --repo "$repo" --event push --branch main --limit 100 --json headSha 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	prs="$("$GH" pr list --repo "$repo" --state merged --limit 1000 --json number,mergedAt,mergedBy,mergeCommit 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
+	runs="$("$GH" run list --repo "$repo" --event push --branch main --limit 1000 --json headSha 2>/dev/null)" || { printf '%s\t\tunknown\tunknown\n' "$repo"; return; }
 	jq -c --arg since "$cutoff" '.[] | select(.mergedAt >= $since)' <<<"$prs" 2>/dev/null | while IFS= read -r pr; do
 		sha="$(jq -r '.mergeCommit.oid // empty' <<<"$pr")"; by="$(jq -r '.mergedBy.login // "unknown"' <<<"$pr")"; num="$(jq -r .number <<<"$pr")"
 		if jq -e --arg sha "$sha" 'any(.[]; .headSha == $sha)' <<<"$runs" >/dev/null 2>&1; then verdict=cascaded; else verdict=suppressed; fi
@@ -173,7 +195,14 @@ rollout_repo() {
 	marker='<!-- catalyst:cat-151-automerge-cascade -->'
 	open="$("$GH" pr list --repo "$repo" --state open --search 'cat-151-automerge-cascade' --json body --jq '.[].body' 2>/dev/null || true)"
 	grep -qF "$marker" <<<"$open" && { echo "$repo: already-open"; return 0; }
-	if [[ $FIX -eq 0 ]]; then echo "$repo: dry-run would patch .github/workflows/$file"; return 0; fi
+	if [[ $FIX -eq 0 ]]; then
+		scratch="$(mktemp -d "${TMPDIR:-/tmp}/automerge-dry-run.XXXXXX")" || return 1
+		workflow_body "$repo" "$file" >"$scratch/$file" || { rm -rf "$scratch"; return 1; }
+		echo "$repo: dry-run diff for .github/workflows/$file"
+		patch_workflow "$scratch/$file"
+		rm -rf "$scratch"
+		return 0
+	fi
 	scratch="$(mktemp -d "${TMPDIR:-/tmp}/automerge-rollout.XXXXXX")" || return 1
 	clone_url="$("$GH" repo view "$repo" --json url --jq .url 2>/dev/null || true)"; [[ -n "$clone_url" ]] || clone_url="https://github.com/${repo}.git"
 	if ! git clone -q --depth 1 "$clone_url" "$scratch/repo"; then echo "$repo: failed (clone)"; rm -rf "$scratch"; return 1; fi
@@ -196,19 +225,20 @@ done < <(load_repos)
 
 case "$MODE" in
 audit)
-	ROWS=""; bad=0
-	for repo in "${REPOS[@]}"; do row="$(classify_repo "$repo")"; ROWS+="${row}"$'\n'; grep -q $'\tsuppressed' <<<"$row" && bad=1; done
-	emit_audit "$ROWS"; [[ $bad -eq 1 ]] && exit 10; exit 0 ;;
+	ROWS=""; bad=0 unknown=0
+	for repo in "${REPOS[@]}"; do row="$(classify_repo "$repo")"; ROWS+="${row}"$'\n'; grep -q $'\tsuppressed' <<<"$row" && bad=1; grep -q $'\tunknown\t' <<<"$row" && unknown=1; done
+	emit_audit "$ROWS"; [[ $bad -eq 1 ]] && exit 10; [[ $unknown -eq 1 ]] && exit 5; exit 0 ;;
 verify|history)
 	[[ -n "$SINCE" ]] || { [[ "$MODE" == history ]] && SINCE=90d || SINCE=7d; }
 	CUTOFF="$(since_iso "$SINCE")" || die "invalid --since value '$SINCE'"
-	bad=0
+	bad=0 unknown=0
 	for repo in "${REPOS[@]}"; do
 		rows="$(verify_repo "$repo" "$CUTOFF")"
 		if [[ "$MODE" == history ]]; then filtered="$(grep $'\tsuppressed\t' <<<"$rows" || true)"; [[ -n "$filtered" ]] && printf '%s\n' "$filtered"; count="$(grep -c $'\tsuppressed\t' <<<"$rows" || true)"; echo "$repo: $count merges never deployed"; else [[ -n "$rows" ]] && printf '%s\n' "$rows" || printf '%s\t\tno-merges\tno-merges\n' "$repo"; fi
 		grep -q $'\tsuppressed\t' <<<"$rows" && bad=1
+		grep -q $'\tunknown\t' <<<"$rows" && unknown=1
 	done
-	[[ $bad -eq 1 ]] && exit 10; exit 0 ;;
+	[[ $bad -eq 1 ]] && exit 10; [[ $unknown -eq 1 ]] && exit 5; exit 0 ;;
 rollout)
 	bad=0 touched=0
 	for repo in "${REPOS[@]}"; do

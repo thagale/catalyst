@@ -16,4 +16,12 @@ grep -qF $'org/repo\t#48\tthagale\tcascaded\tgood' "$S/out" || exit 1
 [[ $rc -eq 10 ]] || exit 1
 set +e; "$SUT" --verify --since nonsense --repos "$S/repos.json" >/dev/null 2>&1; rc=$?; set -e
 [[ $rc -eq 2 ]] || exit 1
-echo '4 passed, 0 failed'
+cat >"$S/fail-gh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$S/fail-gh"
+set +e; CATALYST_AUTOMERGE_GH_BIN="$S/fail-gh" "$SUT" --verify --since 7d --repos "$S/repos.json" >"$S/failed"; rc=$?; set -e
+[[ $rc -eq 5 ]] || exit 1
+grep -qF $'org/repo\t\tunknown\tunknown' "$S/failed" || exit 1
+echo '6 passed, 0 failed'

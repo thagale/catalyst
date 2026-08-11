@@ -17,6 +17,6 @@ elif [[ "$1 $2" == 'pr list' ]]; then echo '[]'; else echo "$*" >>"$GH_CALLS"; e
 EOF
 chmod +x "$S/gh"; echo '["org/repo"]' >"$S/repos.json"; : >"$S/calls"
 GH_FIXTURE_DIR="$S/f" GH_CALLS="$S/calls" CATALYST_AUTOMERGE_GH_BIN="$S/gh" "$SUT" --rollout --repos "$S/repos.json" >"$S/out"
-grep -qF 'dry-run would patch' "$S/out" || exit 1
+grep -qF 'dry-run diff for' "$S/out" || exit 1
 [[ ! -s "$S/calls" ]] || exit 1
 echo '2 passed, 0 failed'
