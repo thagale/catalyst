@@ -50,7 +50,7 @@ import {
 // (linear-query.mjs never imports replica-read.mjs either; daemon.mjs:681 builds
 // the reader and passes it in). monitor.mjs stays Node-loadable.
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
-import { isLivenessAnchorTicket } from "./dispatch-exclusions.mjs";
+import { isLivenessAnchorTicket, resolveAnchorIssueCached } from "./dispatch-exclusions.mjs";
 import { claimDispatchSync, readTriageAttemptCountSync, bumpTriageAttemptCountSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS; CTL-1649: fleet-wide triage attempt count
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import {
@@ -1901,6 +1901,7 @@ export function startMonitor({
   // no bun:sqlite import). Stored module-level so reconcileAll/reconcileProject
   // (which the reconcile timer drives) read it without re-threading.
   eligibleReplica,
+  anchorIssue = resolveAnchorIssueCached(),
 } = {}) {
   _injectedEligibleReplica = eligibleReplica ?? null;
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
@@ -1927,6 +1928,7 @@ export function startMonitor({
     botUserIds,
     botWriteId,
     gateway,
+    anchorIssue,
   };
   reconcileAll({ exec });
   sweepMissingTriage({
@@ -1941,6 +1943,7 @@ export function startMonitor({
     botUserIds,
     botWriteId,
     gateway,
+    anchorIssue,
   }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
@@ -2002,6 +2005,7 @@ export function startMonitor({
       botUserIds,
       botWriteId,
       gateway,
+      anchorIssue,
     }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
   }, reconcileIntervalMs);
 }

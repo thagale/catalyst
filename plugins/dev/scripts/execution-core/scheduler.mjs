@@ -9671,7 +9671,13 @@ function runTick() {
       // CTL-1150: thread the triage-artifact predicate (undefined → inline
       // existsSync default in schedulerTick; test seam via startScheduler).
       hasTriageArtifact: runningOpts.hasTriageArtifact,
-      anchorIssue: runningOpts.anchorIssue,
+      // Resolve on every tick so the 60s cache TTL applies to new-work
+      // admission too. Explicit startScheduler overrides remain pinned for
+      // hermetic tests and callers that intentionally supply one.
+      anchorIssue:
+        runningOpts.anchorIssue === undefined
+          ? resolveAnchorIssueCached()
+          : runningOpts.anchorIssue,
       // CTL-1290: thread the board-health delegate's real-IO seams. Like the
       // stallJanitor/unstuckSweep censuses above, these are bound ONLY in the
       // daemon — a bare schedulerTick (unit test) passes no `boardHealth` so the
@@ -10153,7 +10159,7 @@ export function startScheduler({
   // schedulerTick's inline existsSync default applies. Tests that are not
   // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
   hasTriageArtifact = undefined,
-  anchorIssue = resolveAnchorIssueCached(),
+  anchorIssue,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {

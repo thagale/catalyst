@@ -2492,6 +2492,8 @@ describe("schedulerTick — new-work pull", () => {
       liveBackgroundCount: () => 0,
       hasTriageArtifact: () => true,
       listStartedTickets: () => new Set(),
+      hosts: ["test-host"],
+      hostName: "test-host",
     };
     expect(schedulerTick(orchDir, { ...base, anchorIssue: "CAT-1" }).dispatched).toEqual(["CAT-2"]);
   });
@@ -2508,6 +2510,8 @@ describe("schedulerTick — new-work pull", () => {
       hasTriageArtifact: () => true,
       listStartedTickets: () => new Set(),
       anchorIssue: null,
+      hosts: ["test-host"],
+      hostName: "test-host",
     }).dispatched).toEqual(["CAT-1"]);
   });
   test("dispatches research for the top-ranked ready ticket into a free slot", () => {

@@ -34,6 +34,7 @@ import { loadCursor, saveCursor } from "./event-cursor.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
 import { linearBreaker } from "./linear-breaker.mjs"; // close the shared breaker so the D2 replica-miss fall-through is deterministic
+import { _resetAnchorCacheForTests } from "./dispatch-exclusions.mjs";
 import {
   getReconcileHealth,
   readReconcileHealthMarkers,
@@ -53,6 +54,7 @@ import {
 
 let catalystDir;
 let prevCatalystDir;
+let prevLivenessAnchorIssue;
 const enrolledTeams = new Set();
 const registryEntries = [];
 
@@ -60,10 +62,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
+  prevLivenessAnchorIssue = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-mon-"));
   process.env.CATALYST_DIR = catalystDir;
   mkdirSync(join(catalystDir, "execution-core"), { recursive: true });
   __resetForTests();
+  _resetAnchorCacheForTests();
   __resetFleetFreezeLatch(); // CTL-1420: the fleet-freeze latch is module-global + now persisted — reset per test
   enrolledTeams.clear();
   registryEntries.length = 0;
@@ -75,6 +79,9 @@ afterEach(() => {
   for (const t of enrolledTeams) dropProject(t);
   if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
   else process.env.CATALYST_DIR = prevCatalystDir;
+  if (prevLivenessAnchorIssue === undefined) delete process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+  else process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = prevLivenessAnchorIssue;
+  _resetAnchorCacheForTests();
   rmSync(catalystDir, { recursive: true, force: true });
 });
 
@@ -1439,6 +1446,24 @@ describe("sweepMissingTriage (CTL-711)", () => {
       dispatch,
       anchorIssue: "CAT-1",
     });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("startMonitor resolves and excludes the configured liveness anchor", () => {
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CAT-1";
+    _resetAnchorCacheForTests();
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dispatch = mock(() => ({ code: 0 }));
+
+    startMonitor({
+      exec: execReturning({ ENG: [node("CAT-1")] }),
+      orchDir: realOrchDir,
+      dispatch,
+      reconcileIntervalMs: 60_000,
+      tailerPollMs: 0,
+    });
+
     expect(dispatch).not.toHaveBeenCalled();
   });
 
