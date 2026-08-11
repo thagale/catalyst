@@ -599,6 +599,15 @@ export function defaultAppendOrphanDetectedEvent({
   );
 }
 
+// CAT-3 — operator-visible record of a deliberately suppressed escalation write.
+// This uses the generic operator envelope because escalation.* is not phase-keyed.
+export function defaultAppendFenceSuppressedEvent({ ticket, site, host, reason = "fence-suppressed" }) {
+  return defaultAppendOperatorEvent({
+    "event.name": "escalation.fence-suppressed",
+    payload: { ticket, site, host, reason },
+  });
+}
+
 // ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────
 //
 // A wedged-never-started worker registered with CC but never resolved its
