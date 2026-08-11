@@ -215,6 +215,7 @@ import {
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
   defaultAppendFenceSuppressedEvent,
+  emitFenceSuppressedEventOnce,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -3286,10 +3287,6 @@ function fenceSuppressMarkerPath(orchDir, ticket) {
   return join(orchDir, "workers", ticket, ".fence-suppressed");
 }
 
-function fenceSuppressedEmitMarkerPath(orchDir, ticket, site) {
-  return join(orchDir, "workers", ticket, `.escalation-fence-suppressed-${site}.applied`);
-}
-
 // The escalation-side cooldown is a SEPARATE marker from `.fence-suppressed`, and
 // deliberately so. `.fence-suppressed` means "a fence-guarded write was SUPPRESSED
 // here", and terminalDoneOnce reads it as a reason to skip its own probe. The
@@ -3837,26 +3834,9 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
-export function emitFenceSuppressedOnce(
-  orchDir,
-  ticket,
-  site,
-  self,
-  appendFenceSuppressedEvent
-) {
-  const marker = fenceSuppressedEmitMarkerPath(orchDir, ticket, site);
-  if (existsSync(marker)) return;
+export function emitFenceSuppressedOnce(orchDir, ticket, site, self, appendFenceSuppressedEvent) {
   try {
-    const ok = appendFenceSuppressedEvent({
-      ticket,
-      site,
-      host: self,
-      reason: "fence-suppressed",
-    });
-    if (ok !== false) {
-      mkdirSync(dirname(marker), { recursive: true });
-      writeFileSync(marker, "");
-    }
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, self, appendFenceSuppressedEvent);
   } catch (err) {
     log.warn(
       { ticket, site, err: err.message },

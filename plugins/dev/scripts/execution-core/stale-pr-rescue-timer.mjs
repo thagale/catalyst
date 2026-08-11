@@ -19,11 +19,15 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { jobLifecycle, defaultAppendFenceSuppressedEvent } from "./recovery.mjs";
+import {
+  jobLifecycle,
+  defaultAppendFenceSuppressedEvent,
+  emitFenceSuppressedEventOnce,
+} from "./recovery.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
-import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
+import { log, getEventLogPath, getClusterHosts, getHostName } from "./config.mjs";
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
 // a writer (scheduler.mjs threads its own), so without this default every
@@ -343,7 +347,12 @@ export function defaultEscalate(
     // generation must LOUDLY proceed with the label rather than silently drop a
     // human escalation. A genuine supersession (readable generation, fresh
     // foreign owner / authoritative read says not-current) still suppresses.
-    if (fenceGuard({ ticket, orchDir, multiHost, gateway, self }, { proceedOnMissingGeneration: true })) {
+    if (
+      fenceGuard(
+        { ticket, orchDir, multiHost, gateway, self },
+        { proceedOnMissingGeneration: true }
+      )
+    ) {
       const r = routeStuckTicketToDelegate(orchDir, ticket, {
         site: "stale-pr-rescue",
         reason: detail?.reason ?? "unresolvable-conflict",
@@ -370,27 +379,19 @@ export function defaultEscalate(
         { ticket },
         "ctl-863: stale fence — suppressing stale-pr-rescue labelOnce write (zombie guard)"
       );
-      const marker = join(
-        orchDir,
-        "workers",
-        ticket,
-        ".escalation-fence-suppressed-stale-pr-rescue.applied"
-      );
-      if (!existsSync(marker) && typeof appendFenceSuppressedEvent === "function") {
-        try {
-          const ok = appendFenceSuppressedEvent({
-            ticket,
-            site: "stale-pr-rescue",
-            host: self,
-            reason: "fence-suppressed",
-          });
-          if (ok !== false) writeFileSync(marker, "");
-        } catch (err) {
-          log.warn(
-            { ticket, err: err.message },
-            "cat-3: stale-pr-rescue fence-suppressed emit threw"
-          );
-        }
+      try {
+        emitFenceSuppressedEventOnce(
+          orchDir,
+          ticket,
+          "stale-pr-rescue",
+          self,
+          appendFenceSuppressedEvent
+        );
+      } catch (err) {
+        log.warn(
+          { ticket, err: err.message },
+          "cat-3: stale-pr-rescue fence-suppressed emit threw"
+        );
       }
     }
   } else {
@@ -493,6 +494,8 @@ export function startStalePrRescueTimer({
   // (which already owns concurrency); importing readMaxParallel here would pull
   // scheduler.mjs's bun:sqlite graph into this timer. undefined → prior behavior.
   maxParallel = undefined,
+  gateway = undefined,
+  self = getHostName(),
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -527,6 +530,9 @@ export function startStalePrRescueTimer({
         cfg,
         linearWrite,
         multiHost: tickMultiHost,
+        maxParallel,
+        gateway,
+        self,
         jobLifecycleFn,
         prView,
         compareBehind,
@@ -553,6 +559,8 @@ async function runTick({
   linearWrite,
   multiHost,
   maxParallel,
+  gateway,
+  self,
   jobLifecycleFn,
   prView,
   compareBehind,
@@ -582,6 +590,8 @@ async function runTick({
         linearWrite,
         multiHost,
         maxParallel,
+        gateway,
+        self,
         nowMs,
         jobLifecycleFn,
         prView,
@@ -606,6 +616,8 @@ async function processTicket({
   linearWrite,
   multiHost,
   maxParallel,
+  gateway,
+  self,
   nowMs,
   jobLifecycleFn,
   prView,
@@ -666,7 +678,15 @@ async function processTicket({
     const stalledOutcome = escalate(
       ticket,
       { reason: "rescue_worker_stalled", ...rescueState },
-      { orchDir, orchId: effectiveOrchId, linearWrite, multiHost, maxParallel }
+      {
+        orchDir,
+        orchId: effectiveOrchId,
+        linearWrite,
+        multiHost,
+        maxParallel,
+        gateway,
+        self,
+      }
     );
     // CTL-1609 (Codex P1): latch escalatedAt ONLY on a confirmed label write.
     // decideRescue skips forever once escalatedAt exists, so latching on an
@@ -798,6 +818,8 @@ async function processTicket({
         linearWrite,
         multiHost,
         maxParallel,
+        gateway,
+        self,
       });
       // CTL-1609 (Codex P1): see recordEscalationOutcome — escalatedAt is a
       // permanent skip in decideRescue, so it is written only when the needs-human
