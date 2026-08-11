@@ -13,11 +13,17 @@ TMPROOT="$(mktemp -d)"; trap 'rm -rf "$TMPROOT"' EXIT
 source "$LIB"
 mk_gh() { local dir="$TMPROOT/bin.$RANDOM"; mkdir -p "$dir"; { echo '#!/usr/bin/env bash'; printf 'printf %%s %q\n' "$1"; echo "exit $2"; } > "$dir/gh"; chmod +x "$dir/gh"; echo "$dir"; }
 probe_with() { local bin; bin="$(mk_gh "$1" "$2")"; PATH="$bin:$PATH" merge_permission_probe owner/repo; }
+describe_with() { local bin; bin="$(mk_gh "$1" "$2")"; PATH="$bin:$PATH" merge_permission_describe owner/repo; }
 assert_eq "$(probe_with '{"push":false,"maintain":false,"admin":false}' 0)" denied "read-only grant"
 assert_eq "$(probe_with '{"push":true,"maintain":false,"admin":false}' 0)" ok "push grant"
 assert_eq "$(probe_with '{"push":false,"maintain":false,"admin":true}' 0)" ok "admin grant"
 assert_eq "$(probe_with '' 1)" unknown "gh failure fails open"
 assert_eq "$(probe_with '{}' 0)" unknown "missing permissions fails open"
+assert_eq "$(describe_with '{"admin":false,"maintain":false,"push":false,"triage":true,"pull":true}' 0)" "denied TRIAGE" "triage grant is reported"
+assert_eq "$(describe_with '{"admin":false,"maintain":false,"push":false,"triage":false,"pull":true}' 0)" "denied READ" "read grant is reported"
+assert_eq "$(describe_with '{"admin":false,"maintain":false,"push":false,"triage":false,"pull":false}' 0)" "denied NONE" "no grant is reported"
+assert_eq "$(describe_with '{"admin":false,"maintain":true,"push":true}' 0)" "ok MAINTAIN" "maintain outranks write"
+assert_eq "$(describe_with '' 1)" "unknown UNKNOWN" "failed grant lookup is unknown"
 assert_denial() { if merge_denial_is_permission "$1"; then assert_eq 0 "$2" "$3"; else assert_eq 1 "$2" "$3"; fi; }
 assert_denial 'GraphQL: user does not have the correct permissions to execute `MergePullRequest`' 0 "GraphQL denial"
 assert_denial 'HTTP 403: Must have admin rights to Repository.' 0 "admin denial"
@@ -66,8 +72,11 @@ else
 fi
 
 BODY="$(cat "$SKILL")"
-assert_contains "$BODY" "merge_permission_probe" "preflight wired"
+assert_contains "$BODY" "merge_permission_describe" "preflight wired"
 assert_contains "$BODY" "merge_denial_is_permission" "call-site classifier wired"
+assert_contains "$BODY" "MERGE_PERM_LIB_OK" "merge classifier is source-gated"
+assert_contains "$BODY" "merge_failed_unclassified" "unclassified merge failure emits terminal reason"
+assert_contains "$BODY" "merge_permission_describe" "preflight surfaces concrete grant"
 PRE_LINE="$(grep -n 'merge_permission_probe' "$SKILL" | head -1 | cut -d: -f1)"
 MERGE_LINE="$(grep -n 'if ! gh pr merge' "$SKILL" | head -1 | cut -d: -f1)"
 [[ "$PRE_LINE" -lt "$MERGE_LINE" ]] && pass "preflight precedes merge" || fail "preflight ordering"
