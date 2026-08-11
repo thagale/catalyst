@@ -36,7 +36,54 @@ import {
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD,
   __clearLagStateForTest,
+  resolveDirtyGuardMode,
+  checkoutWorkingTreeDirty,
+  PLUGIN_DIRTY_SKIP_GRACE_MS,
 } from "./plugin-refresh.mjs";
+
+describe("CAT-167 resolveDirtyGuardMode", () => {
+  test("defaults to enforce when unset", () => expect(resolveDirtyGuardMode({})).toBe("enforce"));
+  test("accepts the three valid modes", () => {
+    for (const mode of ["off", "shadow", "enforce"]) {
+      expect(resolveDirtyGuardMode({ CATALYST_PLUGIN_DIRTY_GUARD: mode })).toBe(mode);
+    }
+  });
+  test("an unrecognized value fails safe to enforce", () => {
+    expect(resolveDirtyGuardMode({ CATALYST_PLUGIN_DIRTY_GUARD: "yes" })).toBe("enforce");
+    expect(resolveDirtyGuardMode({ CATALYST_PLUGIN_DIRTY_GUARD: "" })).toBe("enforce");
+  });
+});
+
+describe("CAT-167 checkoutWorkingTreeDirty", () => {
+  test("clean tree is not dirty and excludes untracked files", () => {
+    const calls = [];
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: (root, args) => { calls.push({ root, args }); return ""; } });
+    expect(res).toEqual({ dirty: false, reason: null, entries: [], entryCount: 0 });
+    expect(calls[0].args).toEqual(["status", "--porcelain", "--untracked-files=no"]);
+  });
+  test("tracked modifications are dirty with paths", () => {
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: () => " M monitor.mjs\nM  a.mjs" });
+    expect(res.dirty).toBe(true);
+    expect(res.reason).toBe("tracked_changes");
+    expect(res.entryCount).toBe(2);
+    expect(res.entries).toContain("monitor.mjs");
+  });
+  test("an untracked-only tree is not dirty", () => {
+    expect(checkoutWorkingTreeDirty({ root: "/co", gitFn: () => "" }).dirty).toBe(false);
+  });
+  test("an unreadable status fails closed", () => {
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: () => { throw new Error("not a git repository"); } });
+    expect(res.dirty).toBe(true);
+    expect(res.reason).toBe("status_failed");
+    expect(res.error).toMatch(/not a git repository/);
+  });
+  test("caps the event entry sample", () => {
+    const many = Array.from({ length: 50 }, (_, i) => ` M f${i}.mjs`).join("\n");
+    const res = checkoutWorkingTreeDirty({ root: "/co", gitFn: () => many });
+    expect(res.entryCount).toBe(50);
+    expect(res.entries.length).toBeLessThanOrEqual(10);
+  });
+});
 
 // ─── resolvePluginCheckoutRoots ──────────────────────────────────────────────
 //
