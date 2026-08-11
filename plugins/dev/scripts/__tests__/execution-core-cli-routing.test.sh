@@ -76,7 +76,7 @@ fi
 echo "test 5 (CTL-649): 'sessions list --json' routes to the sessions module"
 OUT="$("$SCRIPT" sessions list --json 2>/dev/null)"
 RC=$?
-if [ "$RC" = "0" ] && echo "$OUT" | grep -q '\[\]'; then
+if [ "$RC" = "0" ] && [[ "$OUT" == \[* ]]; then
 	pass "sessions list --json emits a JSON array"
 else
 	fail "sessions list --json emits a JSON array" "rc=$RC out=$OUT"
@@ -85,7 +85,7 @@ fi
 echo "test 5b (CTL-649): 'worktrees list --json' routes to the worktrees module"
 OUT="$("$SCRIPT" worktrees list --json 2>/dev/null)"
 RC=$?
-if [ "$RC" = "0" ] && echo "$OUT" | grep -q '\['; then
+if [ "$RC" = "0" ] && [[ "$OUT" == \[* ]]; then
 	pass "worktrees list --json routes to worktrees module"
 else
 	fail "worktrees list --json routes to worktrees module" "rc=$RC out=$OUT"
@@ -94,7 +94,8 @@ fi
 echo "test 5c (CTL-649): 'branches list --json' routes to the branches module"
 OUT="$("$SCRIPT" branches list --json 2>/dev/null)"
 RC=$?
-if [ "$RC" = "0" ] && echo "$OUT" | grep -q '\['; then
+if [ "$RC" = "0" ] && [[ "$OUT" == \[* ]] &&
+	{ ! command -v jq >/dev/null 2>&1 || printf '%s' "$OUT" | jq -e 'type == "array"' >/dev/null; }; then
 	pass "branches list --json routes to branches module"
 else
 	fail "branches list --json routes to branches module" "rc=$RC out=$OUT"
