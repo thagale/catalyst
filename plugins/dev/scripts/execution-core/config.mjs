@@ -2184,6 +2184,16 @@ export function readReplicaBoardHealthConfig(env = process.env) {
   return { mode: "shadow" };
 }
 
+export function readReplicaReseedConfig(env = process.env) {
+  let configured;
+  try { configured = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.linearReplica?.reseed; } catch { /* absent */ }
+  const value = env.CATALYST_REPLICA_RESEED;
+  if (typeof value === "string" && BOARD_HEALTH_MODES.has(value)) return { mode: value };
+  if (typeof value === "string" && value.trim() !== "") return { mode: "shadow" };
+  if (typeof configured === "string" && BOARD_HEALTH_MODES.has(configured)) return { mode: configured };
+  return { mode: "shadow" };
+}
+
 // CTL-1488: coordination-substrate rollout config. Same off→shadow→enforce
 // discipline (ADR-023) and env-override → Layer-2 → default precedence as
 // readBoardHealthConfig, with ONE deliberate difference: the default is "off",
