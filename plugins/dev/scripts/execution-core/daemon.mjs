@@ -113,6 +113,7 @@ import { startDelegateRunnerTimer, reapOrphanedRunners } from "./delegate-runner
 import { startStalePrRescueTimer, readStalePrRescueConfig } from "./stale-pr-rescue-timer.mjs";
 import { startStalledPrTimer as realStartStalledPrTimer, readStalledPrSweepConfig, DEFAULTS as STALLED_DEFAULTS } from "./stalled-pr-timer.mjs";
 import { startGithubQuotaTimer as realStartGithubQuotaTimer, readGithubQuotaSweepConfig, DEFAULTS as GITHUB_QUOTA_TIMER_DEFAULTS } from "./github-quota-timer.mjs";
+import { startReplicaSampleTimer as realStartReplicaSampleTimer, readReplicaSweepConfig, DEFAULTS as REPLICA_SAMPLE_TIMER_DEFAULTS } from "./replica-sample-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
 import { startOrphanPrSweepTimer, readOrphanPrSweepConfig } from "./orphan-pr-sweep-timer.mjs";
 import { DEFAULTS as ORPHAN_DEFAULTS } from "./orphan-pr-sweep.mjs";
@@ -227,6 +228,7 @@ let _linearReconcileTimer = null;
 let _stalledPrTimer = null;
 // CAT-40: periodic GitHub core REST quota snapshot sampler.
 let _githubQuotaTimer = null;
+let _replicaSampleTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
@@ -855,6 +857,7 @@ export function startDaemon({
   startStalledPrTimer: startStalledPrTimerFn = realStartStalledPrTimer,
   // CAT-40: injectable GitHub quota sampler seam.
   startGithubQuotaTimer: startGithubQuotaTimerFn = realStartGithubQuotaTimer,
+  startReplicaSampleTimer: startReplicaSampleTimerFn = realStartReplicaSampleTimer,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -1343,6 +1346,15 @@ export function startDaemon({
       _githubQuotaTimer = startGithubQuotaTimerFn({
         enabled: githubQuotaCfg.enabled ?? true,
         intervalSeconds: githubQuotaCfg.intervalSeconds ?? GITHUB_QUOTA_TIMER_DEFAULTS.intervalSeconds,
+        orchDir,
+        primeImmediately: true,
+      });
+    }
+    {
+      const replicaCfg = readReplicaSweepConfig(configPath);
+      _replicaSampleTimer = startReplicaSampleTimerFn({
+        enabled: replicaCfg.enabled ?? true,
+        intervalSeconds: replicaCfg.intervalSeconds ?? REPLICA_SAMPLE_TIMER_DEFAULTS.intervalSeconds,
         orchDir,
         primeImmediately: true,
       });
@@ -2390,6 +2402,10 @@ export function stopDaemon() {
       /* timer already stopped */
     }
     _githubQuotaTimer = null;
+  }
+  if (_replicaSampleTimer) {
+    try { _replicaSampleTimer.stop(); } catch { /* timer already stopped */ }
+    _replicaSampleTimer = null;
   }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.
