@@ -19,7 +19,7 @@ import {
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { jobLifecycle } from "./recovery.mjs";
+import { jobLifecycle, defaultAppendFenceSuppressedEvent } from "./recovery.mjs";
 import { routeStuckTicketToDelegate } from "./delegate-first.mjs"; // CTL-1609
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
@@ -454,11 +454,6 @@ function defaultEmit(name, payload) {
   } catch {
     /* best-effort */
   }
-}
-
-function defaultAppendFenceSuppressedEvent(payload) {
-  defaultEmit("escalation.fence-suppressed", payload);
-  return true;
 }
 
 /**
