@@ -6970,6 +6970,13 @@ export function schedulerTick(
                 logger: log,
                 detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
               });
+              emitFenceSuppressedOnce(
+                orchDir,
+                member,
+                "dependency-cycle",
+                self,
+                appendFenceSuppressedEvent
+              );
             }
           }
         }
@@ -7891,7 +7898,7 @@ export function schedulerTick(
           } else {
             log.warn(
               { ticket: member, reason: c925FenceVerdict?.reason ?? null },
-              "cat-173: fence suppressed eligible dependency-cycle escalation",
+              "ctl-863: stale fence — suppressing labelOnce(needs-human/ctl-925-cycle) write (zombie guard)"
             );
             maybeBreakGlass({
               orchDir,
@@ -7905,6 +7912,13 @@ export function schedulerTick(
               logger: log,
               detail: `dependency-cycle members: ${anomaly.members.join(" → ")}`,
             });
+            emitFenceSuppressedOnce(
+              orchDir,
+              member,
+              "ctl-925-cycle",
+              self,
+              appendFenceSuppressedEvent
+            );
           }
         }
       }
@@ -8675,6 +8689,16 @@ export function schedulerTick(
                   /* best-effort — a missing marker already permits retry */
                 }
               }
+              // CAT-3: the log.warn + stampFenceSuppress above already cover this
+              // else-branch's original scope — this is the one genuinely new piece
+              // CAT-3 adds on top of CAT-173's standoff handling: per-site telemetry.
+              emitFenceSuppressedOnce(
+                orchDir,
+                ticket,
+                "terminal-sweep",
+                self,
+                appendFenceSuppressedEvent
+              );
             }
           }
           // CTL-868 route (B): emit a canonical orphan-detected event (once) so a
