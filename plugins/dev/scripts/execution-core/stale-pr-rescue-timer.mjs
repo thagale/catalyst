@@ -341,6 +341,7 @@ export function defaultEscalate(
     fenceGuardFn = fenceGuard,
     recordDurableEscalationFn = recordDurableEscalation,
     appendStandoffEvent = appendFenceStandoffEvent,
+    appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent,
   } = {}
 ) {
   let routed = false;
@@ -399,6 +400,18 @@ export function defaultEscalate(
         recordEscalation: recordDurableEscalationFn,
         detail: `stale PR #${detail?.prNumber ?? "?"}`,
       });
+      if (typeof appendFenceSuppressedEvent === "function") {
+        try {
+          appendFenceSuppressedEvent({
+            ticket,
+            site: "stale-pr-rescue",
+            host: self,
+            reason: "fence-suppressed",
+          });
+        } catch {
+          /* best-effort observability */
+        }
+      }
     }
   } else {
     log.warn(
@@ -471,6 +484,11 @@ function defaultEmit(name, payload) {
   } catch {
     /* best-effort */
   }
+}
+
+function defaultAppendFenceSuppressedEvent(payload) {
+  defaultEmit("escalation.fence-suppressed", payload);
+  return true;
 }
 
 /**
