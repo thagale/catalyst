@@ -2071,7 +2071,17 @@ export function readStalledRepullConfig(env = process.env) {
   const allowed = new Set(["off", "shadow", "enforce"]);
   const envMode = env.CATALYST_STALLED_REPULL;
   const configured = { ...l1, ...l2 };
-  const mode = allowed.has(envMode) ? envMode : allowed.has(configured.mode) ? configured.mode : "shadow";
+  let mode;
+  if (envMode === "0") {
+    mode = "off";
+  } else if (allowed.has(envMode)) {
+    mode = envMode;
+  } else if (typeof envMode === "string" && envMode.trim() !== "") {
+    // A typo in an actuation override must never leave Layer-2 `enforce` live.
+    mode = "shadow";
+  } else {
+    mode = allowed.has(configured.mode) ? configured.mode : "shadow";
+  }
   const positive = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback;
   return {
     mode,

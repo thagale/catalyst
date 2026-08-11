@@ -1,5 +1,5 @@
 // stalled-repull.mjs — CAT-223 machine-owned stalled-worker recycling.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TERMINAL = new Set(["stalled", "failed", "aborted"]);
@@ -15,6 +15,15 @@ export function isStalledRepullable({ signals, class: cls, bgProtected, ageMs, a
 }
 export function detachWorkerDir(orchDir, ticket, { now = Date.now() } = {}) {
   const source = join(orchDir, "workers", ticket);
+  try {
+    if (statSync(join(source, "inbox.jsonl")).size > 0) {
+      const error = new Error(`refusing to detach ${ticket}: unconsumed inbox`);
+      error.code = "INBOX_PENDING";
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   const retainedRoot = join(orchDir, ".repulled");
   mkdirSync(retainedRoot, { recursive: true });
   const path = join(retainedRoot, `${ticket}-${now}`);
@@ -26,7 +35,14 @@ function attemptPath(orchDir, ticket) {
 }
 export function readRepullAttempts(orchDir, ticket) {
   try {
-    return JSON.parse(readFileSync(attemptPath(orchDir, ticket), "utf8"));
+    const value = JSON.parse(readFileSync(attemptPath(orchDir, ticket), "utf8"));
+    if (!Number.isInteger(value?.attempts) || value.attempts < 0) {
+      return { attempts: Infinity, lastRepullAt: null };
+    }
+    return {
+      attempts: value.attempts,
+      lastRepullAt: Number.isFinite(value.lastRepullAt) ? value.lastRepullAt : null,
+    };
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
     return { attempts: 0, lastRepullAt: null };

@@ -7724,13 +7724,24 @@ export function schedulerTick(
   if (repullMode !== "off") {
     for (const skip of skips.filter((entry) => entry.class === "machine-owned")) {
       try {
+        const workerDir = join(orchDir, "workers", skip.ticket);
+        const signalFiles = readdirSync(workerDir).filter(isPhaseSignalName);
         const signals = readPhaseSignals(orchDir, skip.ticket);
+        if (Object.keys(signals).length !== signalFiles.length) {
+          appendStalledRepullEvent({
+            ticket: skip.ticket,
+            orchId: skip.ticket,
+            mode: repullMode,
+            outcome: "malformed-signal-skip",
+            reason: "unreadable-phase-signal",
+          });
+          continue;
+        }
         const live = livePhaseEntries(signals);
-        const raw = live
-          .map(([phase]) => readPhaseSignalRaw(orchDir, skip.ticket, phase))
-          .filter(Boolean)
-          .at(-1);
-        const dirStat = statSync(join(orchDir, "workers", skip.ticket));
+        const rawSignals = signalFiles
+          .map((name) => readPhaseSignalRaw(orchDir, skip.ticket, name.slice(6, -5)))
+          .filter(Boolean);
+        const dirStat = statSync(workerDir);
         const attempt = readRepullAttempts(orchDir, skip.ticket);
         const currentMs = now();
         const backoffOk =
@@ -7739,9 +7750,9 @@ export function schedulerTick(
         const verdict = isStalledRepullable({
           signals: Object.fromEntries(live),
           class: skip.class,
-          bgProtected: raw?.bg_job_id
-            ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive)
-            : false,
+          bgProtected: rawSignals.some((raw) =>
+            raw?.bg_job_id ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive) : false
+          ),
           ageMs: currentMs - dirStat.mtimeMs,
           attempts: attempt.attempts,
           opts: repullConfig,
@@ -7761,9 +7772,8 @@ export function schedulerTick(
                   return;
                 }
                 try {
-                  detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
                   recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
-                  startedTickets.delete(skip.ticket);
+                  detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
                   appendStalledRepullEvent({
                     ticket: skip.ticket,
                     orchId: skip.ticket,
@@ -7772,6 +7782,13 @@ export function schedulerTick(
                     reason: verdict.reason,
                   });
                 } catch (error) {
+                  appendStalledRepullEvent({
+                    ticket: skip.ticket,
+                    orchId: skip.ticket,
+                    mode: repullMode,
+                    outcome: "detach-failed",
+                    reason: error?.code ?? "detach-error",
+                  });
                   log.warn(
                     { ticket: skip.ticket, error: String(error) },
                     "scheduler: confirmed-label stalled repull failed closed (CAT-223)"

@@ -954,7 +954,7 @@ export function defaultAppendDispatchSkippedEvent({ ticket, orchId, descriptor }
   return appendEnvelopeBestEffort(buildEventEnvelope({
     phase: "scheduler", ticket, orchId, action: "dispatch-skipped",
     reason: descriptor?.reason ?? "unknown",
-    payloadExtras: descriptor ?? {},
+    payloadExtras: { skip: descriptor ?? null },
   }), "dispatch-skipped");
 }
 

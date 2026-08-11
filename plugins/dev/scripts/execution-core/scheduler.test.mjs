@@ -6905,6 +6905,79 @@ describe("CTL-660: phase.dispatch.requested/launched emission (scheduler)", () =
   });
 });
 
+describe("CAT-223: stalled worker repull integration", () => {
+  const eligibleOne = (id) => [{
+    identifier: id,
+    priority: 1,
+    createdAt: "x",
+    state: "Todo",
+    labels: ["Ready"],
+    blockedBy: [],
+    raw: { team: { key: "CTL" } },
+  }];
+  const spy = () => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return true; };
+    fn.calls = calls;
+    return fn;
+  };
+  const seedStalled = (ticket) => {
+    writeSignalRaw(ticket, "implement", {
+      ticket,
+      phase: "implement",
+      status: "stalled",
+      stalledReason: "dispatch-circuit-breaker",
+    });
+    const dir = join(orchDir, "workers", ticket);
+    utimesSync(dir, new Date(0), new Date(0));
+    return dir;
+  };
+
+  test("enforce bounds a detach failure and emits its outcome", () => {
+    const ticket = "CAT-223-INBOX";
+    const dir = seedStalled(ticket);
+    writeFileSync(join(dir, "inbox.jsonl"), '{"type":"directive"}\n');
+    utimesSync(dir, new Date(0), new Date(0));
+    const repulled = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      writeStatus: { removeLabel: () => ({ removed: true }) },
+      env: { CATALYST_STALLED_REPULL: "enforce" },
+      now: () => 60 * 60_000,
+    });
+    expect(repulled.calls).toContainEqual(expect.objectContaining({ outcome: "detach-failed" }));
+    expect(existsSync(dir)).toBe(true);
+    expect(readFileSync(join(orchDir, ".stalled-repull", `${ticket}.json`), "utf8")).toContain(
+      '"attempts":1'
+    );
+  });
+
+  test("malformed signal fails closed before detaching", () => {
+    const ticket = "CAT-223-MALFORMED";
+    const dir = seedStalled(ticket);
+    writeFileSync(join(dir, "phase-review.json"), "{\n");
+    utimesSync(dir, new Date(0), new Date(0));
+    const repulled = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      env: { CATALYST_STALLED_REPULL: "shadow" },
+      now: () => 60 * 60_000,
+    });
+    expect(repulled.calls).toContainEqual(expect.objectContaining({
+      outcome: "malformed-signal-skip",
+    }));
+    expect(existsSync(dir)).toBe(true);
+  });
+});
+
 // ─── CTL-705 Phase 2: stageRankForTicket, readWorkerPriority, writeWorkerPriority, buildGlobalRanking ───
 import { PHASES } from "../lib/phase-fsm.mjs";
 

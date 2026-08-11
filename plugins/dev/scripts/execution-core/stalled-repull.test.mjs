@@ -52,6 +52,22 @@ test("malformed attempt records fail closed", () => {
   expect(() => readRepullAttempts(orch, "CAT-223")).toThrow();
 });
 
+test("non-throwing malformed attempt shapes exhaust the cap", () => {
+  const orch = mkdtempSync(join(tmpdir(), "repull-malformed-shape-"));
+  mkdirSync(join(orch, ".stalled-repull"), { recursive: true });
+  writeFileSync(join(orch, ".stalled-repull", "CAT-223.json"), "{}\n");
+  expect(readRepullAttempts(orch, "CAT-223").attempts).toBe(Infinity);
+});
+
+test("detach refuses to archive an unconsumed inbox", () => {
+  const orch = mkdtempSync(join(tmpdir(), "repull-inbox-"));
+  const worker = join(orch, "workers", "CAT-223");
+  mkdirSync(worker, { recursive: true });
+  writeFileSync(join(worker, "inbox.jsonl"), '{"type":"directive"}\n');
+  expect(() => detachWorkerDir(orch, "CAT-223")).toThrow("unconsumed inbox");
+  expect(existsSync(worker)).toBe(true);
+});
+
 test("repull config reads the documented Layer-1 location", () => {
   const root = mkdtempSync(join(tmpdir(), "repull-config-"));
   const configPath = join(root, "config.json");
@@ -76,4 +92,20 @@ test("repull config reads the documented Layer-1 location", () => {
     maxRepullAttempts: 3,
     repullBackoffMs: 22,
   });
+});
+
+test("invalid set env mode fails safe instead of inheriting Layer-1 enforce", () => {
+  const root = mkdtempSync(join(tmpdir(), "repull-config-invalid-env-"));
+  const configPath = join(root, "config.json");
+  writeFileSync(configPath, JSON.stringify({ catalyst: { orchestration: { stalledRepull: {
+    mode: "enforce",
+  } } } }));
+  expect(readStalledRepullConfig({
+    CATALYST_CONFIG_FILE: configPath,
+    CATALYST_STALLED_REPULL: "enfore",
+  }).mode).toBe("shadow");
+  expect(readStalledRepullConfig({
+    CATALYST_CONFIG_FILE: configPath,
+    CATALYST_STALLED_REPULL: "0",
+  }).mode).toBe("off");
 });
