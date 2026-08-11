@@ -26,13 +26,13 @@ cpi_find_orphans() {
     current="$(ps -o ppid= -p "$current" 2>/dev/null)" || break
     current="${current//[[:space:]]/}"
   done
-  while read -r pid ppid command; do
+  while read -r pid command; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
     [[ " $ancestors " == *" $pid "* ]] && continue
     [[ "$command" == *"$pattern"* ]] || continue
     case "$command" in *"ps -ww -axo uid=,pid=,ppid=,command="*|*"awk "*) continue ;; esac
     printf '%s\n' "$pid"
-  done < <(ps -ww -axo uid=,pid=,ppid=,command= 2>/dev/null | awk -v uid="$uid" '$1 == uid { p=$2; pp=$3; $1=$2=$3=""; sub(/^ +/, ""); print p, pp, $0 }')
+  done < <(ps -ww -axo uid=,pid=,command= 2>/dev/null | awk -v uid="$uid" '$1 == uid { p=$2; $1=$2=""; sub(/^ +/, ""); print p, $0 }')
 }
 
 cpi_stop_pid() {
