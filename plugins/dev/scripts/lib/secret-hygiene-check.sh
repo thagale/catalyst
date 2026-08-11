@@ -3,7 +3,11 @@
 # Each function prints FAIL: … to stderr on violation and returns non-zero.
 # bash-3.2 safe: no mapfile, no associative arrays.
 
-source "${BASH_SOURCE[0]%/*}/portable-stat.sh"
+# Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh.
+# shellcheck disable=SC2296
+__SHC_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+__SHC_LIB_DIR="$(cd "$(dirname "$__SHC_SELF")" && pwd)"
+source "${__SHC_LIB_DIR}/portable-stat.sh"
 
 # check_secret_file_modes [config_dir]
 # Fail if any config_dir/config*.json is group/other readable (perm bits & 077 set).
@@ -12,8 +16,16 @@ check_secret_file_modes() {
 	local rc=0 mode oct f
 	for f in "${config_dir}"/config*.json; do
 		[[ -f "$f" ]] || continue
-		mode="$(portable_stat_mode "$f")" || continue
-		oct="$(portable_stat_mode_oct "$f")" || continue
+		if ! mode="$(portable_stat_mode "$f")"; then
+			echo "FAIL: ${f} mode unreadable" >&2
+			rc=1
+			continue
+		fi
+		if ! oct="$(portable_stat_mode_oct "$f")"; then
+			echo "FAIL: ${f} mode unreadable" >&2
+			rc=1
+			continue
+		fi
 		if (( (oct & 63) != 0 )); then
 			echo "FAIL: ${f} is mode ${mode} (expected 600, group/other readable)" >&2
 			rc=1

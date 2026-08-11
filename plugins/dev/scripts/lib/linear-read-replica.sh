@@ -44,8 +44,8 @@ _CATALYST_LINEAR_READ_REPLICA_SH=1
 # expanding BASH_SOURCE inside the emitters throws under zsh -u (CAT-35).
 # shellcheck disable=SC2296
 __LRR_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
-source "${__LRR_SELF%/*}/portable-stat.sh"
 __LRR_LIB_DIR="$(cd "$(dirname "$__LRR_SELF")" && pwd)"
+source "${__LRR_LIB_DIR}/portable-stat.sh"
 
 # _lrr_emit_fallback_event <ID> <reason> <source> — best-effort: append a WARN
 # `catalyst.replica.read_fallback` event to the unified log so every replica
