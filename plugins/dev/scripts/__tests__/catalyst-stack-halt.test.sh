@@ -31,15 +31,20 @@ ok jq -e 'select(.attributes["event.name"] == "node.stack.start-suppressed") | .
 : > "$TMP/calls"; ok "$STACK" start; ok test ! -e "$CATALYST_DIR/stack-halt.json"; ok test -s "$TMP/calls"
 ok bash -c "'$STACK' status 2>&1 | grep -q supervision"
 ok "$STACK" stop; ok "$STACK" restart; ok test ! -e "$CATALYST_DIR/stack-halt.json"
-# Malformed haltedAt must self-heal, not abort the calling shell. A float reaching
+# Malformed haltedAt must not abort the calling shell. A float reaching
 # $((now - halted)) is a fatal bash arithmetic error that kills `status` outright.
+# `status` is READ-ONLY (stack_halt_describe pins STACK_HALT_NO_HEAL=1): it
+# classifies the marker but must NOT rename it aside, or merely looking at the
+# stack would discard the operator's halt intent and let launchd revive it. The
+# self-heal belongs to the mutating callers, asserted below.
 for bad in 1.5 notanumber '"2026-01-01"'; do
   printf '{"haltedAt":%s,"host":"h","reason":"r","by":"u","ttlSecs":86400}\n' "$bad" \
     > "$CATALYST_DIR/stack-halt.json"
   ok bash -c "'$STACK' status >/dev/null 2>&1"
-  ok test ! -e "$CATALYST_DIR/stack-halt.json"
-  rm -f "$CATALYST_DIR"/stack-halt.json.invalid.*
+  ok test -e "$CATALYST_DIR/stack-halt.json"
+  ok bash -c "! compgen -G '$CATALYST_DIR/stack-halt.json.invalid.*' >/dev/null"
 done
+rm -f "$CATALYST_DIR/stack-halt.json"
 # A future-dated marker must expire (malformed), never pin age at 0 and strand the host.
 printf '{"haltedAt":99999999999,"host":"h","reason":"r","by":"u","ttlSecs":86400}\n' \
   > "$CATALYST_DIR/stack-halt.json"
