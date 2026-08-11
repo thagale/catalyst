@@ -324,10 +324,17 @@ exit 0
 EOF
 chmod +x "$STUBDIR2/catalyst-execution-core"
 
-# git stub: records args, succeeds
+# git stub: records args and models the one-checkout hotpatch preflight.
 cat > "$STUBDIR2/git" <<EOF
 #!/usr/bin/env bash
 echo "\$@" >> "${SCRATCH}/git.args"
+case "\$*" in
+  *"rev-parse --show-toplevel"*) echo "${FAKE_REPO}" ;;
+  *"status --porcelain"*) [[ "\${GIT_MODE:-}" == dirty ]] && echo ' M dirty-file' ;;
+  *"rev-list --count origin/main..HEAD"*) [[ "\${GIT_MODE:-}" == ahead ]] && echo 1 || echo 0 ;;
+  *"rev-list --count HEAD..origin/main"*) echo 1 ;;
+  *"rev-parse HEAD"*) echo 0123456789abcdef0123456789abcdef01234567 ;;
+esac
 exit 0
 EOF
 chmod +x "$STUBDIR2/git"
@@ -340,28 +347,39 @@ exit 0
 EOF
 chmod +x "$STUBDIR2/rsync"
 
-run "restart --hotpatch calls git pull --ff-only" bash -c "
+run "hotpatch (one-checkout): restart --hotpatch calls git pull --ff-only" bash -c "
   rm -f '${SCRATCH}/git.args' '${SCRATCH}/rsync.args'
+  PATH='${STUBDIR2}:${REAL_PATH}' \
+    CATALYST_PLUGIN_DIRS='${FAKE_REPO}/plugins/dev' \
+    HOME='${SCRATCH}/fake_home' \
+    '${STACK}' restart --hotpatch >/dev/null 2>&1
+  grep -q 'fetch -q origin main' '${SCRATCH}/git.args' &&
+  grep -q 'pull --ff-only' '${SCRATCH}/git.args' &&
+  [[ ! -f '${SCRATCH}/rsync.args' ]]
+"
+
+run "hotpatch (--legacy-rsync): calls rsync with -ac" bash -c "
+  rm -f '${SCRATCH}/git.args' '${SCRATCH}/rsync.args' '${SCRATCH}/legacy.err'
   PATH='${STUBDIR2}:${REAL_PATH}' \
     CATALYST_REPO_DIR='${FAKE_REPO}' \
     HOME='${SCRATCH}/fake_home' \
-    '${STACK}' restart --hotpatch >/dev/null 2>&1
-  grep -q 'pull --ff-only' '${SCRATCH}/git.args'
-"
-
-run "restart --hotpatch calls rsync with -ac" bash -c "
+    '${STACK}' hotpatch --legacy-rsync >/dev/null 2>'${SCRATCH}/legacy.err'
   grep -q -- '-ac' '${SCRATCH}/rsync.args'
 "
 
-run "hotpatch rsync never uses --delete" bash -c "
-  ! grep -q -- '--delete' '${SCRATCH}/rsync.args'
+run "hotpatch (--legacy-rsync): warns that the path is deprecated" bash -c "
+  grep -qi 'deprecated' '${SCRATCH}/legacy.err'
 "
 
-run "hotpatch rsync excludes node_modules" bash -c "
+run "hotpatch (--legacy-rsync): rsync never uses --delete" bash -c "
+  [[ -f '${SCRATCH}/rsync.args' ]] && ! grep -q -- '--delete' '${SCRATCH}/rsync.args'
+"
+
+run "hotpatch (--legacy-rsync): rsync excludes node_modules" bash -c "
   grep -q 'node_modules' '${SCRATCH}/rsync.args'
 "
 
-run "hotpatch rsync targets catalyst-dev in destination" bash -c "
+run "hotpatch (--legacy-rsync): rsync targets catalyst-dev in destination" bash -c "
   grep -q 'catalyst-dev' '${SCRATCH}/rsync.args'
 "
 
@@ -371,8 +389,15 @@ make_stubs "$STUBDIR_GITFAIL"
 cp "$STUBDIR2/catalyst-execution-core" "$STUBDIR_GITFAIL/catalyst-execution-core"
 cat > "$STUBDIR_GITFAIL/git" <<EOF
 #!/usr/bin/env bash
-if echo "\$@" | grep -q "ff-only"; then exit 1; fi
 echo "\$@" >> "${SCRATCH}/git_gitfail.args"
+case "\$*" in
+  *"rev-parse --show-toplevel"*) echo "${FAKE_REPO}" ;;
+  *"status --porcelain"*) ;;
+  *"rev-list --count origin/main..HEAD"*) echo 0 ;;
+  *"rev-list --count HEAD..origin/main"*) echo 1 ;;
+  *"rev-parse HEAD"*) echo 0123456789abcdef0123456789abcdef01234567 ;;
+  *"pull --ff-only"*) exit 1 ;;
+esac
 exit 0
 EOF
 chmod +x "$STUBDIR_GITFAIL/git"
@@ -383,16 +408,32 @@ exit 0
 EOF
 chmod +x "$STUBDIR_GITFAIL/rsync"
 
-run "hotpatch aborts on non-ff pull before rsync" bash -c "
-  rm -f '${SCRATCH}/rsync_gitfail.args'
+run "hotpatch (one-checkout): aborts on non-ff pull after attempting it" bash -c "
+  rm -f '${SCRATCH}/git_gitfail.args' '${SCRATCH}/rsync_gitfail.args'
   set +e
   PATH='${STUBDIR_GITFAIL}:${REAL_PATH}' \
-    CATALYST_REPO_DIR='${FAKE_REPO}' \
+    CATALYST_PLUGIN_DIRS='${FAKE_REPO}/plugins/dev' \
     HOME='${SCRATCH}/fake_home' \
     '${STACK}' restart --hotpatch >/dev/null 2>&1
   rc=\$?
   set -e
-  [[ \$rc -ne 0 ]] && [[ ! -f '${SCRATCH}/rsync_gitfail.args' ]]
+  [[ \$rc -ne 0 ]] && grep -q 'pull --ff-only' '${SCRATCH}/git_gitfail.args' && [[ ! -f '${SCRATCH}/rsync_gitfail.args' ]]
+"
+
+run "hotpatch (one-checkout): dirty checkout aborts before fetch" bash -c "
+  rm -f '${SCRATCH}/git.args'
+  ! PATH='${STUBDIR2}:${REAL_PATH}' GIT_MODE=dirty \
+    CATALYST_PLUGIN_DIRS='${FAKE_REPO}/plugins/dev' HOME='${SCRATCH}/fake_home' \
+    '${STACK}' restart --hotpatch >/dev/null 2>&1
+  ! grep -q 'fetch -q origin main' '${SCRATCH}/git.args'
+"
+
+run "hotpatch (one-checkout): ahead checkout aborts before pull" bash -c "
+  rm -f '${SCRATCH}/git.args'
+  ! PATH='${STUBDIR2}:${REAL_PATH}' GIT_MODE=ahead \
+    CATALYST_PLUGIN_DIRS='${FAKE_REPO}/plugins/dev' HOME='${SCRATCH}/fake_home' \
+    '${STACK}' restart --hotpatch >/dev/null 2>&1
+  grep -q 'fetch -q origin main' '${SCRATCH}/git.args' && ! grep -q 'pull --ff-only' '${SCRATCH}/git.args'
 "
 
 run "start --hotpatch on live stack refuses with restart message" bash -c "
