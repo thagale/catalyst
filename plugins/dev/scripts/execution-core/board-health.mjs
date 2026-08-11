@@ -41,6 +41,7 @@ import {
   isLivenessAnchorTicket,
   resolveAnchorIssueCached,
 } from "./dispatch-exclusions.mjs";
+import { classifyStallReason } from "./dispatch-skip.mjs";
 
 // ── thresholds + cadence (env-tunable, bounded defaults) ─────────────────────
 export const DEFAULT_THRESHOLDS = {
@@ -769,10 +770,22 @@ export function assembleBoardState({
     if (isHumanEscalatedSignal(escalation)) humanEscalatedTickets.add(ticket);
   }
 
+  const latestSkipSignal = new Map();
+  for (const signal of signals) {
+    const reason = signal.failureReason ?? signal.attentionReason ?? signal.raw?.stalledReason ?? signal.stalledReason;
+    if (!reason || !signal.ticket) continue;
+    const ts = Date.parse(signal.updatedAt ?? signal.raw?.updatedAt ?? "") || 0;
+    const previous = latestSkipSignal.get(signal.ticket);
+    if (!previous || ts >= previous.ts) latestSkipSignal.set(signal.ticket, { ts, reason });
+  }
+  const dispatchSkips = [...latestSkipSignal].map(([ticket, value]) => ({
+    ticket, reason: value.reason, class: classifyStallReason(value.reason),
+  }));
   return Object.freeze({
     ticketsById,
     signals,
     eligible,
+    dispatchSkips,
     roster: rosterArr,
     dispatchRoster: resolveRosterSeam(getDispatchRoster, rosterArr),
     // CTL-1524 (C4b): resolve here too, so a direct assembleBoardState caller may

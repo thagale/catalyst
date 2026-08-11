@@ -225,6 +225,8 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
+  defaultAppendDispatchSkippedEvent,
+  defaultAppendStalledRepullEvent,
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
@@ -4419,6 +4421,8 @@ export function schedulerTick(
     // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
     // (module-level set) so only the first observation per daemon lifetime fires.
     appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
+    appendDispatchSkippedEvent = defaultAppendDispatchSkippedEvent,
+    appendStalledRepullEvent = defaultAppendStalledRepullEvent,
     // CTL-705: preemption seams — injectable for tests, default to real helpers.
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
@@ -8112,7 +8116,12 @@ export function schedulerTick(
   const skipSummary = summarizeSkips(skips, { cap: HELD_LOG_CAP });
   const readyNow = new Set(ready.map((t) => t.identifier));
   for (const ticket of lastSkipEmit.keys()) if (!readyNow.has(ticket)) lastSkipEmit.delete(ticket);
-  for (const skip of skips) lastSkipEmit.set(skip.ticket, skip.class);
+  for (const skip of skips) {
+    if (lastSkipEmit.get(skip.ticket) !== skip.class) {
+      appendDispatchSkippedEvent({ ticket: skip.ticket, orchId: skip.ticket, descriptor: skip });
+      lastSkipEmit.set(skip.ticket, skip.class);
+    }
+  }
 
   const repullConfig = readStalledRepullConfig(env);
   const repullMode = repullConfig.mode;
@@ -8134,10 +8143,15 @@ export function schedulerTick(
           attempts: attempt.attempts,
           opts: repullConfig,
         });
-        if (verdict.ok && backoffOk && repullMode === "enforce") {
-          recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
-          detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
-          startedTickets.delete(skip.ticket);
+        if (verdict.ok && backoffOk) {
+          if (repullMode === "enforce") {
+            recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
+            detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
+            startedTickets.delete(skip.ticket);
+            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "detached", reason: verdict.reason });
+          } else {
+            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "would-detach", reason: verdict.reason });
+          }
         }
       } catch (error) {
         log.warn({ ticket: skip.ticket, error: String(error) }, "scheduler: stalled repull failed closed (CAT-223)");
