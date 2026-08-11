@@ -1,4 +1,4 @@
-import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
+import { isKnownPhase } from "../lib/phase-fsm.mjs";
 
 export const OPERATOR_OWNED_STALL_REASONS = Object.freeze(new Set([
   "needs_human", "escalation-ask-cap", "remediate-cycle-cap-exhausted", "phantom-ticket",
@@ -15,20 +15,13 @@ export function classifyStallReason(reason) {
   return "unknown";
 }
 
-function liveEntries(signals) {
-  const entries = Object.entries(signals ?? {});
-  const known = entries.filter(([phase]) => isKnownPhase(phase));
-  const max = known.reduce((n, [phase]) => Math.max(n, phaseIndex(phase)), -1);
-  return entries.filter(([phase]) => !isKnownPhase(phase) || phaseIndex(phase) === max);
-}
-
 // Keep this precedence aligned with board-data.mjs's worker-signal contract.
 export function signalReason(raw) {
   return raw?.failureReason ?? raw?.attentionReason ?? raw?.stalledReason ?? null;
 }
 
-export function describeSkip({ signals, raw } = {}) {
-  const live = liveEntries(signals);
+export function describeSkip({ signals, raw, liveEntries = Object.entries } = {}) {
+  const live = liveEntries(signals ?? {}).filter(([phase]) => isKnownPhase(phase));
   const [phase = null, status = null] = live.at(-1) ?? [];
   const phaseRaw = phase && raw && typeof raw === "object" ? (raw[phase] ?? raw) : raw;
   const reason = signalReason(phaseRaw);

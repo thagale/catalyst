@@ -2060,19 +2060,24 @@ export function readBoardHealthConfig(env = process.env) {
 }
 
 export function readStalledRepullConfig(env = process.env) {
+  let l1 = {};
+  try {
+    l1 = JSON.parse(readFileSync(env.CATALYST_CONFIG_FILE, "utf8"))?.catalyst?.orchestration?.stalledRepull ?? {};
+  } catch { /* defaults */ }
   let l2 = {};
   try {
     l2 = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.orchestration?.stalledRepull ?? {};
   } catch { /* defaults */ }
   const allowed = new Set(["off", "shadow", "enforce"]);
   const envMode = env.CATALYST_STALLED_REPULL;
-  const mode = allowed.has(envMode) ? envMode : allowed.has(l2.mode) ? l2.mode : "shadow";
+  const configured = { ...l1, ...l2 };
+  const mode = allowed.has(envMode) ? envMode : allowed.has(configured.mode) ? configured.mode : "shadow";
   const positive = (value, fallback) => Number.isFinite(value) && value > 0 ? value : fallback;
   return {
     mode,
-    graceMs: positive(l2.graceMs, 30 * 60_000),
-    maxRepullAttempts: positive(l2.maxRepullAttempts, 2),
-    repullBackoffMs: positive(l2.repullBackoffMs, 2 * 60 * 60_000),
+    graceMs: positive(configured.graceMs, 30 * 60_000),
+    maxRepullAttempts: positive(configured.maxRepullAttempts, 2),
+    repullBackoffMs: positive(configured.repullBackoffMs, 2 * 60 * 60_000),
   };
 }
 

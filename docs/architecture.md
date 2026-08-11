@@ -495,7 +495,7 @@ owned eligible ticket independently, so unrelated work cannot mask a frozen slic
 without ticket attribution retain the board-wide fallback.
 
 The reclaim seam detaches an eligible machine-owned terminal worker directory to a retained
-`.repulled-<ticket>-<timestamp>` sibling before allowing a fresh pull. `off` disables evaluation,
+`.repulled/<ticket>-<timestamp>` retained directory outside `workers/` before allowing a fresh pull. `off` disables evaluation,
 `shadow` reports candidates without mutation, and `enforce` performs the detach. The configuration
 schema and defaults are defined in the configuration reference under
 `catalyst.orchestration.stalledRepull`.

@@ -626,6 +626,8 @@ export function assembleBoardState({
       // CTL-1649: preserve attentionReason so selectAnchorCandidates can exclude
       // tickets whose ONLY non-clean signal is a triage launch failure.
       attentionReason: s.raw?.attentionReason ?? s.attentionReason ?? null,
+      stalledReason: s.raw?.stalledReason ?? s.stalledReason ?? null,
+      raw: s.raw ?? null,
     };
   });
 
@@ -901,9 +903,14 @@ function checkDispatchLiveness(b, t) {
     });
     extra.dispatchEvidence = "per-ticket";
     extra.queuedOwnedUnknownAge = result.unknownAge;
-    const wedged = result.offenders.length > 0;
+    const last = b.ring?.recentDispatchTs ?? null;
+    const staleMs = last == null ? null : b.now - last;
+    const boardWideWedged = last == null || staleMs > t.dispatchStallMs;
+    const wedged = result.offenders.length > 0 || boardWideWedged;
+    extra.dispatchAgeProxy = "ticket.updatedAt may include comments, labels, or reconciliation writes";
+    extra.boardWideDispatchStale = boardWideWedged;
     return invariant(!wedged, wedged ? 1 : 0, true, result.offenders.slice(0, 5),
-      wedged ? `${free} free slot(s) + ${result.offenders.length} stale owned ticket(s) without dispatch → wedge${graceNote}` : `dispatch live${graceNote}`, extra);
+      wedged ? `${free} free slot(s) + ${result.offenders.length} stale owned ticket(s) or stale board dispatch → wedge${graceNote}` : `dispatch live${graceNote}`, extra);
   }
   extra.dispatchEvidence = "board-wide";
   extra.queuedOwnedUnknownAge = 0;

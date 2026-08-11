@@ -19,9 +19,22 @@ describe("dispatch skip attribution", () => {
     const entry = describeSkip({
       signals: { research: "failed", implement: "stalled" },
       raw: { implement: { failureReason: "failure", attentionReason: "attention", stalledReason: "stall" } },
+      liveEntries: () => [["implement", "stalled"]],
     });
     expect(entry).toEqual({ status: "stalled", phase: "implement", reason: "failure", class: "unknown" });
     expect(describeSkip({ signals: {}, raw: null }).class).toBe("unknown");
+  });
+
+  test("ignores a newer recovery-pass inspection signal", () => {
+    const entry = describeSkip({
+      signals: { triage: "done", research: "done", "recovery-pass": "stalled" },
+      raw: {
+        research: { stalledReason: "needs_human" },
+        "recovery-pass": { stalledReason: "boot-resume-gate-expired" },
+      },
+      liveEntries: () => [["research", "done"], ["recovery-pass", "stalled"]],
+    });
+    expect(entry).toEqual({ status: "done", phase: "research", reason: "needs_human", class: "operator-owned" });
   });
 
   test("summarizes uncapped counts while capping details", () => {

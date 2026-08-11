@@ -7704,7 +7704,7 @@ export function schedulerTick(
       for (const phase of Object.keys(signals)) {
         raw[phase] = readPhaseSignalRaw(orchDir, t.identifier, phase);
       }
-      return { ticket: t.identifier, ...describeSkip({ signals, raw }) };
+      return { ticket: t.identifier, ...describeSkip({ signals, raw, liveEntries: livePhaseEntries }) };
     });
   const skipSummary = summarizeSkips(skips, { cap: HELD_LOG_CAP });
   const readyNow = new Set(ready.map((t) => t.identifier));
@@ -7738,8 +7738,9 @@ export function schedulerTick(
         });
         if (verdict.ok && backoffOk) {
           if (repullMode === "enforce") {
-            recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
+            clearStalledLabel(orchDir, skip.ticket, "needs-human", writeStatus);
             detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
+            recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
             startedTickets.delete(skip.ticket);
             appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "detached", reason: verdict.reason });
           } else {
