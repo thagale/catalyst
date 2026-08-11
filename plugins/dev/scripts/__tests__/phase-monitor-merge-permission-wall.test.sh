@@ -71,6 +71,19 @@ else
   pass "CTA never asks the operator to authorize a retry"
 fi
 
+# CAT-257 compound regression: empty explanation + missing emitter must still
+# leave a terminal signal and must report both degraded links on stderr.
+printf 'process.stdout.write("");\n' > "$STUBROOT/scripts/execution-core/escalation-explain.mjs"
+rm -f "$STUBROOT/scripts/phase-agent-emit-complete"
+printf '{"ticket":"CAT-999","phase":"monitor-merge","status":"running"}\n' > "$SIGNAL_FILE"
+PLUGIN_ROOT="$STUBROOT" _escalate_merge_permission "coalesce-labs/catalyst" "3218" "TRIAGE" \
+  >/dev/null 2>"$TMPROOT/compound.err"
+assert_eq "$(jq -r .status "$SIGNAL_FILE")" failed "compound fallback leaves terminal signal"
+assert_contains "$(cat "$TMPROOT/compound.err")" "EMPTY stdout" "empty explanation is diagnosed"
+assert_contains "$(cat "$TMPROOT/compound.err")" "NOT executable" "missing emitter is diagnosed"
+assert_contains "$(cat "$TMPROOT/compound.err")" "no-progress" "missing emitter names recovery consequence"
+assert_eq "$(find "$TMPROOT" -name '*.tmp.*' | wc -l | tr -d ' ')" 0 "compound fallback leaves no temporary file"
+
 BODY="$(cat "$SKILL")"
 assert_contains "$BODY" "merge_permission_describe" "preflight wired"
 assert_contains "$BODY" "merge_denial_is_permission" "call-site classifier wired"
