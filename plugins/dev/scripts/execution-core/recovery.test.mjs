@@ -130,6 +130,10 @@ describe("emitFenceSuppressedEventOnce windowing (CAT-219)", () => {
     seed(JSON.stringify({ emittedAt }));
     emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", () => false);
     expect(JSON.parse(readFileSync(marker(), "utf8")).emittedAt).toBe(emittedAt);
+    const calls = [];
+    emitFenceSuppressedEventOnce(orchDir, ticket, site, "host-a", (event) => calls.push(event));
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(readFileSync(marker(), "utf8")).emittedAt).toBeGreaterThan(emittedAt);
   });
 });
 

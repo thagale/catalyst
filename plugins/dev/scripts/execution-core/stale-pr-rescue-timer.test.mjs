@@ -866,6 +866,44 @@ describe("CAT-219 latent gateway wiring", () => {
     }
   });
 
+  it("threads the suppression sink through rescue_worker_stalled", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CAT-219-STALLED");
+    writeSignal(orchDir, "CAT-219-STALLED", "pr", {
+      status: "done",
+      bg_job_id: "dead",
+      pr: { number: 220, url: "https://github.com/org/repo/pull/220" },
+      worktreePath: "/gone/wt",
+    });
+    writeRescueState(orchDir, "CAT-219-STALLED", {
+      status: "rescue-stalled",
+      rescueAttempts: 1,
+    });
+    const events = [];
+    startStalePrRescueTimer({
+      enabled: true,
+      orchDir,
+      intervalSeconds: 1,
+      clock,
+      multiHost: true,
+      self: "host-a",
+      gateway: { getDescriptor: () => ({ ownerHost: "host-b", generation: 2 }) },
+      appendFenceSuppressedEvent: (event) => events.push(event),
+      ...makeSeams({ escalate: defaultEscalate }),
+    });
+    clock.advance(1_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toEqual([
+      {
+        ticket: "CAT-219-STALLED",
+        site: "stale-pr-rescue",
+        host: "host-a",
+        reason: "fence-suppressed",
+      },
+    ]);
+  });
+
   it("pins daemon gateway omission with the source marker", () => {
     const source = readFileSync(join(import.meta.dir, "daemon.mjs"), "utf8");
     const marker = source.indexOf("CAT-219-GATEWAY-LATENT");
@@ -1263,5 +1301,52 @@ describe("defaultEscalate fence-suppressed event", () => {
       },
     );
     expect(events).toHaveLength(0);
+  });
+});
+
+describe("defaultEscalate delegate ceiling (CAT-219)", () => {
+  it("queue-full falls back to a needs-human label", () => {
+    const dir = mkdtempSync(join(tmpdir(), "cat219-queue-full-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, ".delegate-queue"), { recursive: true });
+    writeFileSync(
+      join(dir, ".delegate-queue", "OTHER-1.json"),
+      JSON.stringify({ ticket: "OTHER-1", status: "queued" }),
+    );
+    const priorFirst = process.env.CATALYST_DELEGATE_FIRST;
+    const priorRunner = process.env.CATALYST_DELEGATE_RUNNER;
+    const priorIntents = process.env.CATALYST_INTENTS_ENFORCE;
+    process.env.CATALYST_DELEGATE_FIRST = "enforce";
+    process.env.CATALYST_DELEGATE_RUNNER = "on";
+    delete process.env.CATALYST_INTENTS_ENFORCE;
+    const labels = [];
+    let ceilingCalls = 0;
+    try {
+      const outcome = defaultEscalate("CAT-219", {}, {
+        orchDir: dir,
+        linearWrite: {
+          applyLabel: (args) => {
+            labels.push(args);
+            return { applied: true };
+          },
+        },
+        multiHost: false,
+        maxParallel: () => {
+          ceilingCalls += 1;
+          return 1;
+        },
+      });
+      expect(ceilingCalls).toBe(1);
+      expect(labels.some((entry) => entry.ticket === "CAT-219" && entry.label === "needs-human"))
+        .toBe(true);
+      expect(outcome.confirmed).toBe(true);
+    } finally {
+      if (priorFirst === undefined) delete process.env.CATALYST_DELEGATE_FIRST;
+      else process.env.CATALYST_DELEGATE_FIRST = priorFirst;
+      if (priorRunner === undefined) delete process.env.CATALYST_DELEGATE_RUNNER;
+      else process.env.CATALYST_DELEGATE_RUNNER = priorRunner;
+      if (priorIntents === undefined) delete process.env.CATALYST_INTENTS_ENFORCE;
+      else process.env.CATALYST_INTENTS_ENFORCE = priorIntents;
+    }
   });
 });
