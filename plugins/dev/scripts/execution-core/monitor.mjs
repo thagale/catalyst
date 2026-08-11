@@ -39,7 +39,6 @@ import {
   hostMembershipWarning, // CTL-1057
   isDraining as isDrainingDefault, // CTL-1095: drain gate
   isInProcessDispatchMode, // CTL-1457 (T2): sdk|codex-exec occupancy gate predicate
-  getLivenessAnchorIssue, // CAT-159: exclude the durable liveness-anchor ticket from dispatch
 } from "./config.mjs";
 // CTL-1397 (Node-loadability): monitor.mjs MUST NOT import replica-read.mjs — that
 // module statically imports `bun:sqlite`, which the Node ESM loader rejects at
@@ -545,10 +544,6 @@ export function handleStateChangedEvent(
     // CTL-1481: worker:<host> label-stamp seam — threaded through to
     // dispatchTriage (undefined → real default; tests inject a fake).
     stampWorkerLabel,
-    // CAT-159: liveness-anchor exclusion seam — threaded through to
-    // dispatchTriage (undefined → real config accessor; tests inject a fixed
-    // value so the guard is deterministic without touching Layer-2 config).
-    livenessAnchorIssue,
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
   } = {}
@@ -601,7 +596,6 @@ export function handleStateChangedEvent(
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
-          livenessAnchorIssue, // CAT-159
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -663,7 +657,6 @@ export function handleStateChangedEvent(
           isDraining, // CTL-1095
           emitBackstop, // CTL-1367 P1
           stampWorkerLabel, // CTL-1481
-          livenessAnchorIssue, // CAT-159
         });
       } else {
         log.debug(
@@ -793,7 +786,13 @@ function dispatchTriage(
     // multi-host triage claim (same gate as emitFenceClaimed). Injectable so
     // tests drive/assert the stamp without touching Linear.
     stampWorkerLabel = defaultStampWorkerLabel,
-    anchorIssue = undefined,
+    // CAT-159: normally threaded down from startMonitor (resolved once per
+    // scan). Defaulted to the real cached accessor rather than `undefined` so a
+    // caller that forgets to thread it still gets the exclusion — losing the
+    // guard is the failure mode this ticket exists to prevent. Tests pass an
+    // explicit value (including null) and the suite clears the env anchor, so
+    // the default never makes a verdict host-dependent.
+    anchorIssue = resolveAnchorIssueCached(),
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
     // CTL-1367 P1: failed-terminal backstop for a REJECTED async (sdk) triage
@@ -833,22 +832,23 @@ function dispatchTriage(
     // Single-host paths never call these.
     readFenceTriageAttempt = readTriageAttemptCountSync,
     bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
-    // CAT-159: the durable cross-host liveness-anchor ticket (config
-    // catalyst.cluster.livenessAnchorIssue) has no completion criteria — it
-    // exists permanently as an attachment point for heartbeat records. It has
-    // nothing to research/implement, so dispatching it here always fails,
-    // escalates to recovery-pass, self-heal-exhausts, and needs a human to
-    // manually clear it back into the identical loop. Checked FIRST — before
-    // orchDir/drain/HRW — so this never costs a Linear call, not even a read.
-    // undefined → the real config accessor (null when unconfigured, matching
-    // every other caller's default).
-    livenessAnchorIssue = getLivenessAnchorIssue(),
   }
 ) {
-  if (livenessAnchorIssue && identifier === livenessAnchorIssue) {
+  // CAT-159: the durable cross-host liveness-anchor ticket (config
+  // catalyst.cluster.livenessAnchorIssue) has no completion criteria — it
+  // exists permanently as an attachment point for heartbeat records. It has
+  // nothing to research/implement, so dispatching it here always fails,
+  // escalates to recovery-pass, self-heal-exhausts, and needs a human to
+  // manually clear it back into the identical loop. Checked FIRST — before
+  // orchDir/drain/HRW — so this never costs a Linear call, not even a read,
+  // and before every budget/counter side effect. Sibling correctness gate to
+  // dispatch-readiness.mjs's new-work admission check and board-health.mjs's
+  // recovery suppression: all three route through the one shared predicate so
+  // they can never disagree.
+  if (isLivenessAnchorTicket(identifier, { anchorIssue })) {
     log.debug(
       { identifier },
-      "cat-159: skipping triage dispatch — ticket is the configured liveness anchor (no completion criteria)"
+      "cat-159: skipping triage dispatch for catalyst.cluster.livenessAnchorIssue"
     );
     return false;
   }
@@ -859,16 +859,6 @@ function dispatchTriage(
   // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
   if (isDraining(orchDir)) {
     log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
-    return false;
-  }
-  // CAT-159: sibling correctness gate to dispatch-readiness.mjs's new-work
-  // admission check. It precedes HRW and all budget/counter side effects so
-  // every host refuses the configured operational anchor consistently.
-  if (isLivenessAnchorTicket(identifier, { anchorIssue })) {
-    log.debug(
-      { identifier },
-      "cat-159: skipping triage dispatch for catalyst.cluster.livenessAnchorIssue"
-    );
     return false;
   }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call

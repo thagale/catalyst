@@ -3328,7 +3328,7 @@ describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
     handleStateChangedEvent(toTriageEvent("CAT-1"), {
       dispatch,
       orchDir,
-      livenessAnchorIssue: "CAT-1",
+      anchorIssue: "CAT-1",
       triageBudget: { remaining: 5 },
     });
     expect(dispatch).not.toHaveBeenCalled();
@@ -3340,7 +3340,7 @@ describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
     handleStateChangedEvent(toTriageEvent("ENG-ANCHOR-2"), {
       dispatch,
       orchDir,
-      livenessAnchorIssue: "CAT-1",
+      anchorIssue: "CAT-1",
       triageBudget: { remaining: 5 },
     });
     expect(dispatch).toHaveBeenCalledTimes(1);
@@ -3352,7 +3352,7 @@ describe("dispatchTriage — liveness-anchor exclusion (CAT-159)", () => {
     handleStateChangedEvent(toTriageEvent("ENG-ANCHOR-3"), {
       dispatch,
       orchDir,
-      livenessAnchorIssue: null,
+      anchorIssue: null,
       triageBudget: { remaining: 5 },
     });
     expect(dispatch).toHaveBeenCalledTimes(1);
