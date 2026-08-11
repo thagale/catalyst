@@ -77,8 +77,12 @@ read_pid() {
   if [[ -f "$PID_FILE" ]]; then
     local pid
     pid="$(cat "$PID_FILE" 2>/dev/null)"
-    if [[ "$pid" =~ ^[0-9]+$ ]] && is_alive "$pid" && cpi_pid_is_ours "$pid" "$BROKER_PROC_PATTERN"; then
-      echo "$pid"; return 0
+    if [[ "$pid" =~ ^[0-9]+$ ]] && is_alive "$pid"; then
+      if cpi_pid_is_ours "$pid" "$BROKER_PROC_PATTERN"; then
+        echo "$pid"; return 0
+      fi
+      echo "warning: pid file $PID_FILE names live pid $pid, but its identity does not match '$BROKER_PROC_PATTERN'; preserving pid file" >&2
+      return 1
     fi
     rm -f "$PID_FILE" 2>/dev/null
   fi

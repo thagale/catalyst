@@ -2281,8 +2281,10 @@ export function checkStackAgent(deps = {}) {
   }
   let marker = null;
   try { marker = readHaltMarker(); } catch { marker = null; }
-  if (marker && typeof marker.haltedAt === "string") {
-    const haltedMs = Date.parse(marker.haltedAt);
+  if (marker && (typeof marker.haltedAt === "number" || typeof marker.haltedAt === "string")) {
+    const haltedMs = typeof marker.haltedAt === "number"
+      ? marker.haltedAt * 1000
+      : Date.parse(marker.haltedAt);
     const ttlSecs = Number(marker.ttlSecs);
     if (Number.isFinite(haltedMs) && Number.isFinite(ttlSecs) && ttlSecs > 0 && nowMs() < haltedMs + ttlSecs * 1000) {
       checks.push(mkCheck("stack-halt", STATUS.INFO,

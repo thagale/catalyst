@@ -16,7 +16,8 @@ spawn() { bash "$marker_script" & SPAWNED=$!; children="$children $SPAWNED"; sle
 
 sleep 30 & imposter=$!; children="$children $imposter"; echo "$imposter" > "$tmp/broker.pid"
 out="$($CLI stop 2>&1)"; rc=$?
-if [[ $rc -eq 0 && "$out" == *"not running"* ]] && kill -0 "$imposter" 2>/dev/null; then ok "recycled pid is not signalled"; else bad "recycled pid is not signalled" "$out rc=$rc"; fi
+if [[ $rc -eq 0 && "$out" == *"not running"* ]] && kill -0 "$imposter" 2>/dev/null && [[ "$(cat "$tmp/broker.pid")" == "$imposter" ]]; then ok "recycled pid is not signalled and its pid file is preserved"; else bad "recycled pid is not signalled and its pid file is preserved" "$out rc=$rc"; fi
+rm -f "$tmp/broker.pid"
 
 spawn; orphan=$SPAWNED; rm -f "$tmp/broker.pid"
 out="$($CLI stop 2>&1)"; rc=$?

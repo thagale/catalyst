@@ -10,7 +10,8 @@ spawn(){ bash "$marker_script" & SPAWNED=$!; children="$children $SPAWNED"; slee
 
 sleep 30 & imposter=$!; children="$children $imposter"; mkdir -p "$tmp/execution-core"; echo "$imposter" > "$tmp/execution-core/daemon.pid"
 out="$($CLI stop 2>&1)"; rc=$?
-if [[ $rc -eq 0 && "$out" == *"not running"* ]] && kill -0 "$imposter" 2>/dev/null; then ok "recycled pid is not signalled"; else bad "recycled pid is not signalled" "$out rc=$rc"; fi
+if [[ $rc -eq 0 && "$out" == *"not running"* ]] && kill -0 "$imposter" 2>/dev/null && [[ "$(cat "$tmp/execution-core/daemon.pid")" == "$imposter" ]]; then ok "recycled pid is not signalled and its pid file is preserved"; else bad "recycled pid is not signalled and its pid file is preserved" "$out rc=$rc"; fi
+rm -f "$tmp/execution-core/daemon.pid"
 spawn; orphan=$SPAWNED; rm -f "$tmp/execution-core/daemon.pid"; out="$($CLI stop 2>&1)"; rc=$?
 if [[ $rc -eq 0 && "$out" == *"orphan"* ]] && ! kill -0 "$orphan" 2>/dev/null; then ok "orphan is found and stopped"; else bad "orphan is found and stopped" "$out rc=$rc"; fi
 out="$($CLI stop 2>&1)"; rc=$?; [[ $rc -eq 0 && "$out" == *"not running"* ]] && ok "absent daemon is a clean no-op" || bad "absent daemon is a clean no-op" "$out rc=$rc"

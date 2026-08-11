@@ -43,11 +43,11 @@ describe("checkStackAgent", () => {
   });
 
   test("active marker is visible, expired marker is not", () => {
-    const active = checkStackAgent(deps({ readHaltMarker: () => ({ haltedAt: "2026-08-11T21:00:00Z", ttlSecs: 7200, reason: "maintenance" }) }));
+    const active = checkStackAgent(deps({ readHaltMarker: () => ({ haltedAt: 1786482000, ttlSecs: 7200, reason: "maintenance" }) }));
     expect(active.some((r) => r.name === "stack-halt" && [STATUS.INFO, STATUS.WARN].includes(r.status))).toBe(true);
     expect(active.find((r) => r.name === "stack-halt").detail).toContain("maintenance");
 
-    const expired = checkStackAgent(deps({ readHaltMarker: () => ({ haltedAt: "2026-08-11T10:00:00Z", ttlSecs: 60, reason: "old" }) }));
+    const expired = checkStackAgent(deps({ readHaltMarker: () => ({ haltedAt: 1786442400, ttlSecs: 60, reason: "old" }) }));
     expect(expired.some((r) => r.name === "stack-halt")).toBe(false);
   });
 });

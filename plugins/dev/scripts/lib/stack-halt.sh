@@ -7,6 +7,7 @@ STACK_HALT_STATE="absent"
 STACK_HALT_AGE_SECS=0
 STACK_HALT_HALTED_AT=""
 STACK_HALT_REASON=""
+STACK_HALT_TTL_EFFECTIVE="$STACK_HALT_TTL_SECS"
 
 stack_halt_write() {
   local reason="${1:-operator requested stop}" dir tmp now host by
@@ -23,7 +24,7 @@ stack_halt_write() {
 stack_halt_clear() { rm -f "$STACK_HALT_FILE"; }
 
 stack_halt_active() {
-  STACK_HALT_STATE="absent"; STACK_HALT_AGE_SECS=0; STACK_HALT_HALTED_AT=""; STACK_HALT_REASON=""
+  STACK_HALT_STATE="absent"; STACK_HALT_AGE_SECS=0; STACK_HALT_HALTED_AT=""; STACK_HALT_REASON=""; STACK_HALT_TTL_EFFECTIVE="$STACK_HALT_TTL_SECS"
   [[ -f "$STACK_HALT_FILE" ]] || return 1
   local now halted ttl
   if ! jq -e '.haltedAt|numbers' "$STACK_HALT_FILE" >/dev/null 2>&1; then
@@ -33,6 +34,7 @@ stack_halt_active() {
   fi
   now="$(date +%s)"; halted="$(jq -r '.haltedAt' "$STACK_HALT_FILE")"
   ttl="$(jq -r '.ttlSecs // empty' "$STACK_HALT_FILE")"; [[ "$ttl" =~ ^[0-9]+$ ]] || ttl="$STACK_HALT_TTL_SECS"
+  STACK_HALT_TTL_EFFECTIVE="$ttl"
   STACK_HALT_AGE_SECS=$((now - halted)); (( STACK_HALT_AGE_SECS < 0 )) && STACK_HALT_AGE_SECS=0
   STACK_HALT_HALTED_AT="$halted"; STACK_HALT_REASON="$(jq -r '.reason // "operator requested stop"' "$STACK_HALT_FILE")"
   if (( STACK_HALT_AGE_SECS >= ttl )); then STACK_HALT_STATE="expired"; return 1; fi
@@ -41,7 +43,7 @@ stack_halt_active() {
 
 stack_halt_describe() {
   if stack_halt_active; then
-    printf 'halted by operator at epoch %s (reason: %s, %ss remaining)' "$STACK_HALT_HALTED_AT" "$STACK_HALT_REASON" "$((STACK_HALT_TTL_SECS - STACK_HALT_AGE_SECS))"
+    printf 'halted by operator at epoch %s (reason: %s, %ss remaining)' "$STACK_HALT_HALTED_AT" "$STACK_HALT_REASON" "$((STACK_HALT_TTL_EFFECTIVE - STACK_HALT_AGE_SECS))"
   else
     printf 'active'
   fi

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -u
 ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"; STACK="$ROOT/plugins/dev/scripts/catalyst-stack"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'launchctl bootout "gui/$(id -u)/ai.coalesce.catalyst-event-mirror" >/dev/null 2>&1 || true; rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/home/catalyst"
+cat > "$TMP/bin/launchctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$TMP/bin/launchctl"
 for c in catalyst-broker catalyst-monitor catalyst-execution-core; do
   cat > "$TMP/bin/$c" <<EOF
 #!/usr/bin/env bash
@@ -26,5 +31,10 @@ ok jq -e 'select(.attributes["event.name"] == "node.stack.start-suppressed") | .
 : > "$TMP/calls"; ok "$STACK" start; ok test ! -e "$CATALYST_DIR/stack-halt.json"; ok test -s "$TMP/calls"
 ok bash -c "'$STACK' status 2>&1 | grep -q supervision"
 ok "$STACK" stop; ok "$STACK" restart; ok test ! -e "$CATALYST_DIR/stack-halt.json"
-ok bash -c "CATALYST_FORCE_BAKE_DIR='/Users/thagale/catalyst/plugin-source/plugins/dev/scripts' '$STACK' install-services --print 2>/dev/null | grep -q '<string>--supervised</string>'"
+BAKE_ROOT="$ROOT"
+GIT_DIR="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || true)"
+if [[ "$GIT_DIR" == */worktrees/* ]]; then
+  BAKE_ROOT="$(dirname "$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)")"
+fi
+ok bash -c "CATALYST_FORCE_BAKE_DIR='$BAKE_ROOT/plugins/dev/scripts' '$STACK' install-services --print 2>/dev/null | grep -q '<string>--supervised</string>'"
 exit "$fail"

@@ -808,7 +808,7 @@ _stop_coordination_unlocked() {
 }
 
 start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
-stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; return "${PIPESTATUS[0]}"; }
 # _broker_running — true only when a broker is actually UP. Matches the "running (pid N)"
 # status line (NOT "not running"). Used to avoid catalyst-broker restart (= stop+start)
 # accidentally STARTING a broker on a daemonless developer/monitor node (Codex P2).
@@ -850,7 +850,7 @@ start_daemon() {
   fi
 }
 
-stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; }
+stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; return "${PIPESTATUS[0]}"; }
 
 # CTL-1654: event-mirror service — fans fleet event logs into the local event file
 # on observation nodes (monitor/developer) so `catalyst-events tail`/`wait-for`
@@ -1319,7 +1319,7 @@ cmd_start() {
 }
 
 cmd_stop() {
-  local halt="yes"
+  local halt="yes" stop_failed="no" halt_written="no"
   while [[ $# -gt 0 ]]; do
     case "$1" in --halt) halt="yes" ;; --no-halt) halt="no" ;; *) fail "unknown stop arg: $1 (try: --no-halt)" ;; esac
     shift
@@ -1331,7 +1331,7 @@ cmd_stop() {
   # CTL-1494: coordination-publish started after forward/before shipper, so stop it
   # here (after the shipper/event-mirror, before stop_daemon/stop_forward).
   stop_coordination
-  stop_daemon
+  stop_daemon || stop_failed="yes"
   # CTL-1502: stop the standalone watchdog BEFORE the forwarder it supervises —
   # otherwise an in-flight enforced restart could relaunch otel-forward after
   # stop_forward already took it down. Unconditional: it's an idempotent no-op on
@@ -1339,13 +1339,24 @@ cmd_stop() {
   stop_daemon_watchdog
   stop_forward
   stop_monitor
-  stop_broker
+  stop_broker || stop_failed="yes"
   stop_mitmproxy
   if [[ "$halt" == "yes" ]]; then
-    stack_halt_write "operator requested stop"
-    _emit_stack_event node.stack.halted INFO "operator halted catalyst stack" \
-      "$(jq -c '{haltedAt,host,reason,by,ttlSecs}' "$STACK_HALT_FILE" 2>/dev/null || echo null)"
+    if stack_halt_write "operator requested stop"; then
+      halt_written="yes"
+    else
+      warn "could not record halt intent (${STACK_HALT_FILE}); the launchd keep-alive WILL restart this stack"
+    fi
+    if [[ "$halt_written" == "yes" && "$stop_failed" == "no" ]]; then
+      _emit_stack_event node.stack.halted INFO "operator halted catalyst stack" \
+        "$(jq -c '{haltedAt,host,reason,by,ttlSecs}' "$STACK_HALT_FILE" 2>/dev/null || echo null)"
+    fi
   fi
+  if [[ "$stop_failed" == "yes" ]]; then
+    warn "one or more daemons did not confirm stop; stack halt is incomplete"
+    return 1
+  fi
+  [[ "$halt" != "yes" || "$halt_written" == "yes" ]] || return 1
   return 0
 }
 
