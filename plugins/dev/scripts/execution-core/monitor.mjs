@@ -549,6 +549,8 @@ export function handleStateChangedEvent(
     // dispatchTriage (undefined → real config accessor; tests inject a fixed
     // value so the guard is deterministic without touching Layer-2 config).
     livenessAnchorIssue,
+    readFenceTriageAttempt = readTriageAttemptCountSync,
+    bumpFenceTriageAttempt = bumpTriageAttemptCountSync,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -592,6 +594,8 @@ export function handleStateChangedEvent(
           hosts,
           hostName,
           anchorIssue,
+          readFenceTriageAttempt,
+          bumpFenceTriageAttempt,
           survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
@@ -652,6 +656,8 @@ export function handleStateChangedEvent(
           hosts,
           hostName,
           anchorIssue,
+          readFenceTriageAttempt,
+          bumpFenceTriageAttempt,
           survivingRosterOverride, // CTL-1091
           claimDispatch, // CTL-862
           isDraining, // CTL-1095
