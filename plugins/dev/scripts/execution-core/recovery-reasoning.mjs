@@ -2535,7 +2535,12 @@ export function defaultSkipReason(ticket, opts = {}) {
 
   // (b) attempts exhausted → stop self-healing (escalateExhaustedIntents turns
   // this into a LOUD escalation on the next sweep — CTL-1440).
-  if (typeof data?.attempts === "number" && data.attempts >= RECOVERY_MAX_ATTEMPTS) {
+  const resolvedSeamFix = data?.decision === "fix" && data?.verdict === "fixed";
+  if (
+    !resolvedSeamFix &&
+    typeof data?.attempts === "number" &&
+    data.attempts >= RECOVERY_MAX_ATTEMPTS
+  ) {
     return "attempts-exhausted";
   }
 
@@ -2665,7 +2670,9 @@ export function escalateExhaustedIntents(orchDir, opts = {}) {
     } catch {
       continue; // malformed → skip (fail-open)
     }
-    const sweepable = data?.decision === "dispatched" || data?.decision === "fix";
+    const resolvedSeamFix = data?.decision === "fix" && data?.verdict === "fixed";
+    const sweepable =
+      !resolvedSeamFix && (data?.decision === "dispatched" || data?.decision === "fix");
     if (!sweepable || data?.escalated === true) continue;
     if (!(typeof data?.attempts === "number" && data.attempts >= maxAttempts)) continue;
     const ticket = f.replace(/\.json$/, "");

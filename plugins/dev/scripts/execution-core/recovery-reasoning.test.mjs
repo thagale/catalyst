@@ -577,6 +577,11 @@ describe("reasoningRecoveryPass", () => {
     const result = reasoningRecoveryPass(items, {
       mode: "enforce",
       invokeSeam: () => ({ success: true, reason: "pushed via fallback token", details: {} }),
+      // Inject the skip gate: defaultShouldSkipItem falls back to the LIVE
+      // resolveOrchDir() ledger, so on an orchestrator host a real
+      // .recovery-intents/CTL-1.json makes this test's item skip and the
+      // assertions below read processed:0. Injecting keeps it hermetic.
+      shouldSkipItem: () => false,
       recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
       postComment: () => {},
       emitEvent: () => {},
@@ -604,6 +609,8 @@ describe("reasoningRecoveryPass", () => {
     const result = reasoningRecoveryPass(items, {
       mode: "enforce",
       invokeSeam: () => ({ success: false, reason: "still rejected", details: {} }),
+      // Hermeticity: see the sibling success-case test above.
+      shouldSkipItem: () => false,
       recordIntent: (ticket, intent) => intents.push({ ticket, intent }),
       postComment: () => {},
       emitEvent: () => {},
@@ -2462,6 +2469,16 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
   test("the sweep excludes verdicts and non-exhausted intents", () => {
     const t0 = 1_000_000_000_000;
     recordVerdict("CTL-LA", { verdict: "leave-alone", reason: "healthy" }, { orchDir, now: () => t0 });
+    defaultRecordIntent(
+      "CTL-FIXED",
+      {
+        decision: "fix",
+        attempts: RECOVERY_MAX_ATTEMPTS,
+        verdict: "fixed",
+        verdictReason: "seam landed",
+      },
+      { orchDir, now: () => t0 },
+    );
     defaultRecordIntent("CTL-DEF", { decision: "defer", fix_class: "board-health", attempts: 5 }, { orchDir, now: () => t0 });
     defaultRecordIntent("CTL-ONE", { decision: "dispatched" }, { orchDir, now: () => t0 }); // attempts 1 < cap
     recordVerdict("CTL-ESC", { verdict: "escalate", reason: "already escalated" }, { orchDir, now: () => t0 });
@@ -2473,6 +2490,37 @@ describe("defaultSkipReason + escalateExhaustedIntents (CTL-1440 P0b)", () => {
       writeSignal: () => {},
     });
     expect(out).toEqual([]);
+    expect(defaultSkipReason("CTL-FIXED", { orchDir, now: () => t0 + RECOVERY_COOLDOWN_MS * 10 })).toBeNull();
+  });
+
+  test("a dispatched marker with a preserved stale fixed verdict remains sweepable", () => {
+    const t0 = 1_000_000_000_000;
+    defaultRecordIntent(
+      "CTL-STALE",
+      { decision: "fix", verdict: "fixed", verdictReason: "prior seam landed" },
+      { orchDir, now: () => t0 },
+    );
+    defaultRecordIntent(
+      "CTL-STALE",
+      { decision: "dispatched", attempts: RECOVERY_MAX_ATTEMPTS },
+      { orchDir, now: () => t0 + 1 },
+    );
+
+    expect(
+      defaultSkipReason("CTL-STALE", {
+        orchDir,
+        now: () => t0 + RECOVERY_COOLDOWN_MS * 10,
+      }),
+    ).toBe("attempts-exhausted");
+    expect(
+      escalateExhaustedIntents(orchDir, {
+        now: () => t0 + RECOVERY_COOLDOWN_MS * 10,
+        emitEvent: () => {},
+        postComment: () => {},
+        labelNeedsHuman: () => true,
+        writeSignal: () => {},
+      }),
+    ).toEqual(["CTL-STALE"]);
   });
 
   test("(Codex R1) a terminal/finished ticket is NEVER swept (isActive gate; fail-open toward active)", () => {
