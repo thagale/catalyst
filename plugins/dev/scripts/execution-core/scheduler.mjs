@@ -74,6 +74,7 @@ import {
   defaultHasTriageArtifact,
   NOT_DISPATCHABLE_LIVENESS_ANCHOR,
 } from "./dispatch-readiness.mjs";
+import { resolveAnchorIssueCached } from "./dispatch-exclusions.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -4678,7 +4679,7 @@ export function schedulerTick(
     // `() => true` to opt out of the filesystem check when the subject is not
     // the triage gate itself.
     hasTriageArtifact = undefined,
-    anchorIssue = undefined,
+    anchorIssue = null,
     // CTL-1150: injectable listStartedTickets override. Default undefined → the
     // real listStartedTickets(orchDir) runs. Tests that seed triage.json (which
     // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
@@ -9670,6 +9671,7 @@ function runTick() {
       // CTL-1150: thread the triage-artifact predicate (undefined → inline
       // existsSync default in schedulerTick; test seam via startScheduler).
       hasTriageArtifact: runningOpts.hasTriageArtifact,
+      anchorIssue: runningOpts.anchorIssue,
       // CTL-1290: thread the board-health delegate's real-IO seams. Like the
       // stallJanitor/unstuckSweep censuses above, these are bound ONLY in the
       // daemon — a bare schedulerTick (unit test) passes no `boardHealth` so the
@@ -10151,6 +10153,7 @@ export function startScheduler({
   // schedulerTick's inline existsSync default applies. Tests that are not
   // exercising the triage gate inject () => true to unblock Pass 2 dispatch.
   hasTriageArtifact = undefined,
+  anchorIssue = resolveAnchorIssueCached(),
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -10188,6 +10191,7 @@ export function startScheduler({
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
     appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
     hasTriageArtifact, // CTL-1150: triage-artifact predicate for Pass 2
+    anchorIssue,
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels

@@ -227,6 +227,10 @@ describe("CAT-159 liveness-anchor board-health suppression", () => {
     expect(moves.tier1).toEqual([]);
     const decision = decideBoardHealth(invariants, board);
     expect(decision.sanctioned).toContain("CAT-1");
+    const event = buildBoardScanEvent({ mode: "shadow", invariants, decision, board });
+    expect(event.details.sanctioned).toContain("CAT-1");
+    expect([...event.details.tier1Moves, ...event.details.tier2Moves, ...event.details.tier3Moves]
+      .some((move) => move.ticket === "CAT-1")).toBe(false);
   });
 });
 

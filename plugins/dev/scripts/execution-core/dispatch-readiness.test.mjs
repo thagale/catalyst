@@ -42,23 +42,24 @@ describe("canOccupySlotNow (CAT-36)", () => {
   });
   test("a ticket with triage.json can occupy a slot", () => {
     seedTriage("CAT-1");
-    expect(canOccupySlotNow(orchDir, "CAT-1")).toEqual({ ok: true, reason: null });
+    expect(canOccupySlotNow(orchDir, "CAT-1", { anchorIssue: null })).toEqual({ ok: true, reason: null });
   });
   test("a ticket with no worker dir cannot occupy a slot", () => {
-    expect(canOccupySlotNow(orchDir, "CAT-2")).toEqual({
+    expect(canOccupySlotNow(orchDir, "CAT-2", { anchorIssue: null })).toEqual({
       ok: false,
       reason: NOT_DISPATCHABLE_UNTRIAGED,
     });
   });
   test("a worker dir without triage.json cannot occupy a slot", () => {
     mkdirSync(join(orchDir, "workers", "CAT-3"));
-    expect(canOccupySlotNow(orchDir, "CAT-3").ok).toBe(false);
+    expect(canOccupySlotNow(orchDir, "CAT-3", { anchorIssue: null }).ok).toBe(false);
   });
   test("honours the injected artifact probe", () => {
-    expect(canOccupySlotNow(orchDir, "CAT-4", { hasTriageArtifact: () => true }).ok).toBe(true);
+    expect(canOccupySlotNow(orchDir, "CAT-4", { hasTriageArtifact: () => true, anchorIssue: null }).ok).toBe(true);
   });
   test("fails closed when the artifact probe throws", () => {
     const result = canOccupySlotNow(orchDir, "CAT-5", {
+      anchorIssue: null,
       hasTriageArtifact: () => {
         throw new Error("EACCES");
       },

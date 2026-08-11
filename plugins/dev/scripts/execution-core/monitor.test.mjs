@@ -1429,6 +1429,19 @@ describe("sweepMissingTriage (CTL-711)", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  test("excludes the configured liveness anchor from sweep candidates", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    reconcileAll({ exec: execReturning({ ENG: [node("CAT-1")] }) });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      anchorIssue: "CAT-1",
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
   test("dispatches only the un-triaged subset across a mixed eligible set", () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core");
@@ -2903,6 +2916,37 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
     expect(claimDispatch).not.toHaveBeenCalled();
     expect(bumpFenceTriageAttempt).not.toHaveBeenCalled();
     expect(budget.remaining).toBe(2);
+  });
+
+  test("liveness anchor is also refused by its HRW owner", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OWNER,
+      survivingRosterOverride: ROSTER,
+      anchorIssue: TICKET,
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("ordinary and fail-open tickets still dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    for (const anchorIssue of ["ENG-OTHER", null]) {
+      const dispatch = mock(() => ({ code: 0 }));
+      handleStateChangedEvent(triageEvent(), {
+        dispatch,
+        orchDir: fakeOrchDir,
+        hosts: ["solo"],
+        hostName: "solo",
+        anchorIssue,
+        applyTriageStatus: () => ({ applied: false, verified: false }),
+        appendEvent: () => {},
+      });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    }
   });
 
   test("single-host roster is an exact no-op: claim NEVER attempted, dispatch proceeds", () => {

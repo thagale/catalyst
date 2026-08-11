@@ -31,8 +31,11 @@ export function _resetAnchorCacheForTests() {
 
 export function isLivenessAnchorTicket(
   identifier,
-  { anchorIssue = resolveAnchorIssueCached() } = {},
+  options = {},
 ) {
+  const anchorIssue = Object.hasOwn(options, "anchorIssue")
+    ? options.anchorIssue
+    : resolveAnchorIssueCached();
   const candidate = typeof identifier === "string" ? identifier.trim() : "";
   const configured = typeof anchorIssue === "string" ? anchorIssue.trim() : "";
   return candidate.length > 0 && configured.length > 0 &&
