@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   canOccupySlotNow,
+  NOT_DISPATCHABLE_LIVENESS_ANCHOR,
   NOT_DISPATCHABLE_TRIAGE_PROBE_ERROR,
   NOT_DISPATCHABLE_UNTRIAGED,
 } from "./dispatch-readiness.mjs";
@@ -22,6 +23,23 @@ function seedTriage(ticket) {
 }
 
 describe("canOccupySlotNow (CAT-36)", () => {
+  test("holds the liveness anchor before probing its triage artifact", () => {
+    seedTriage("CAT-1");
+    expect(canOccupySlotNow(orchDir, "CAT-1", { anchorIssue: "CAT-1" })).toEqual({
+      ok: false,
+      reason: NOT_DISPATCHABLE_LIVENESS_ANCHOR,
+    });
+  });
+  test("admits a triaged non-anchor", () => {
+    seedTriage("CAT-2");
+    expect(canOccupySlotNow(orchDir, "CAT-2", { anchorIssue: "CAT-1" })).toEqual({ ok: true, reason: null });
+  });
+  test("an unresolved anchor config preserves existing behavior", () => {
+    expect(canOccupySlotNow(orchDir, "CAT-1", { anchorIssue: null })).toEqual({
+      ok: false,
+      reason: NOT_DISPATCHABLE_UNTRIAGED,
+    });
+  });
   test("a ticket with triage.json can occupy a slot", () => {
     seedTriage("CAT-1");
     expect(canOccupySlotNow(orchDir, "CAT-1")).toEqual({ ok: true, reason: null });

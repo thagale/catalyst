@@ -69,7 +69,11 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow, countResolveConflictAttempts } from "./event-scan.mjs"; // #1461 Fix 2: countResolveConflictAttempts (complete+failed, not completions-only)
 import { tailParsedEvents } from "./event-tail.mjs"; // CTL-1514: bounded event-log tail
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
-import { canOccupySlotNow, defaultHasTriageArtifact } from "./dispatch-readiness.mjs";
+import {
+  canOccupySlotNow,
+  defaultHasTriageArtifact,
+  NOT_DISPATCHABLE_LIVENESS_ANCHOR,
+} from "./dispatch-readiness.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -4674,6 +4678,7 @@ export function schedulerTick(
     // `() => true` to opt out of the filesystem check when the subject is not
     // the triage gate itself.
     hasTriageArtifact = undefined,
+    anchorIssue = undefined,
     // CTL-1150: injectable listStartedTickets override. Default undefined → the
     // real listStartedTickets(orchDir) runs. Tests that seed triage.json (which
     // creates workers/<ticket>/) inject `() => new Set()` so the seeded ticket
@@ -7948,6 +7953,7 @@ export function schedulerTick(
   const dispatchableReady = ready.filter((t) => {
     const readiness = canOccupySlotNow(orchDir, t.identifier, {
       hasTriageArtifact: _hasTriageArtifact,
+      anchorIssue,
     });
     if (readiness.ok) {
       lastHoldLogged.delete(t.identifier);
@@ -7966,7 +7972,12 @@ export function schedulerTick(
         held_ticks: holdStreak,
         ...(readiness.error ? { error: String(readiness.error) } : {}),
       };
-      if (readiness.error) {
+      if (readiness.reason === NOT_DISPATCHABLE_LIVENESS_ANCHOR) {
+        log.info(
+          context,
+          "cat-159: liveness anchor excluded from new-work dispatch (configured by catalyst.cluster.livenessAnchorIssue)"
+        );
+      } else if (readiness.error) {
         log.warn(context, "ctl-1150: triage artifact probe failed — holding new-work candidate");
       } else {
         log.info(
