@@ -76,16 +76,63 @@ const _driftSinceByRoot = new Map(); // root → epoch ms first seen behind (det
 export const PLUGIN_DRIFT_GRACE_MS =
   Number(process.env.CATALYST_PLUGIN_DRIFT_GRACE_MS) || 180_000;
 
+const VALID_DIRTY_GUARD_MODES = new Set(["off", "shadow", "enforce"]);
+
+export function resolveDirtyGuardMode(env = process.env) {
+  const raw = env.CATALYST_PLUGIN_DIRTY_GUARD;
+  return VALID_DIRTY_GUARD_MODES.has(raw) ? raw : "enforce";
+}
+
+const _dirtySkipSinceByRoot = new Map();
+const _dirtyStaleEmittedByRoot = new Set();
+export const PLUGIN_DIRTY_SKIP_GRACE_MS =
+  Number(process.env.CATALYST_PLUGIN_DIRTY_SKIP_GRACE_MS) || 1_800_000;
+const DIRTY_ENTRY_SAMPLE = 10;
+
+export function checkoutWorkingTreeDirty({ root, gitFn = defaultGitFn }) {
+  let out;
+  try {
+    out = gitFn(root, ["status", "--porcelain", "--untracked-files=no"]);
+  } catch (err) {
+    return {
+      dirty: true,
+      reason: "status_failed",
+      entries: [],
+      entryCount: 0,
+      error: err?.message ?? String(err),
+    };
+  }
+  const lines = String(out ?? "").split("\n").map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) {
+    return { dirty: false, reason: null, entries: [], entryCount: 0 };
+  }
+  const paths = lines.map((line) => {
+    const path = line.slice(2).trim();
+    const arrow = path.indexOf(" -> ");
+    return arrow === -1 ? path : path.slice(arrow + 4);
+  });
+  return {
+    dirty: true,
+    reason: "tracked_changes",
+    entries: paths.slice(0, DIRTY_ENTRY_SAMPLE),
+    entryCount: paths.length,
+  };
+}
+
 export function __clearLagStateForTest() {
   _failuresByRoot.clear();
   _lagEmittedByRoot.clear();
   _driftSinceByRoot.clear();
+  _dirtySkipSinceByRoot.clear();
+  _dirtyStaleEmittedByRoot.clear();
 }
 
 function _clearLagState(root) {
   _failuresByRoot.delete(root);
   _lagEmittedByRoot.delete(root);
   _driftSinceByRoot.delete(root);
+  _dirtySkipSinceByRoot.delete(root);
+  _dirtyStaleEmittedByRoot.delete(root);
 }
 
 // --- default seams (production wiring) ---------------------------------------
