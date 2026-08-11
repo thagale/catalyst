@@ -53,7 +53,7 @@ render_template() {
 }
 
 patch_workflow() {
-	local file="$1" tmp
+	local file="$1" tmp target env_line merge_line
 	grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' "$file" || { echo refused; return 3; }
 	if grep -qF 'AUTOMERGE_PAT: ${{ secrets.' "$file" &&
 		grep -qF '::warning title=Auto-merge cascade suppressed::' "$file"; then
@@ -63,20 +63,22 @@ patch_workflow() {
 	# The patcher preserves repository-specific workflow policy and only expands
 	# an existing block-scalar merge command. Rewriting inline YAML safely would
 	# require a YAML-aware editor; fail closed instead of emitting invalid YAML.
-	grep -qE '^[[:space:]]*run:[[:space:]]+.*gh[[:space:]]+pr[[:space:]]+merge' "$file" && { echo refused; return 3; }
-	grep -qE 'GH_TOKEN:[[:space:]]*\$\{\{[[:space:]]*secrets\.GITHUB_TOKEN[[:space:]]*\}\}' "$file" || { echo refused; return 3; }
+	target="$(merge_step_lines "$file")"
+	[[ -n "$target" ]] || { echo refused; return 3; }
+	read -r env_line merge_line <<<"$target"
+	[[ -n "$env_line" && -n "$merge_line" ]] || { echo refused; return 3; }
 	tmp="$(mktemp "${TMPDIR:-/tmp}/automerge-template.XXXXXX")" || return 3
 	# Modify only the merge step. Repository-specific triggers, authorization
 	# gates, dependencies, permissions, and adjacent steps are security policy.
-	awk -v secret="$SECRET_NAME" '
-		/GH_TOKEN:[[:space:]]*\$\{\{[[:space:]]*secrets\.GITHUB_TOKEN[[:space:]]*\}\}/ {
+	awk -v secret="$SECRET_NAME" -v env_line="$env_line" -v merge_line="$merge_line" '
+		NR == env_line {
 			match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH)
 			print indent "# CAT-151: GITHUB_TOKEN merges do not start downstream workflows."
 			print indent "AUTOMERGE_PAT: ${{ secrets." secret " }}"
 			print indent "FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}"
 			next
 		}
-		/gh[[:space:]]+pr[[:space:]]+merge/ {
+		NR == merge_line {
 			match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH); cmd=$0; sub(/^[[:space:]]*/, "", cmd)
 			print indent "set -euo pipefail"
 			print indent "if [ -n \"${AUTOMERGE_PAT}\" ]; then"
@@ -90,8 +92,50 @@ patch_workflow() {
 		}
 		{print}
 	' "$file" >"$tmp"
+	if ! validate_yaml "$tmp"; then rm -f "$tmp"; echo refused; return 3; fi
 	if cmp -s "$file" "$tmp"; then rm -f "$tmp"; echo already-current; return 0; fi
 	if [[ $FIX -eq 1 || ( -n "$PATCH_FILE" && $PATCH_WRITE -eq 1 ) ]]; then mv "$tmp" "$file"; echo patched; else diff -u "$file" "$tmp" || true; rm -f "$tmp"; echo would-patch; fi
+}
+
+validate_yaml() {
+	local file="$1"
+	if python3 -c 'import yaml' >/dev/null 2>&1; then
+		python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$file" >/dev/null 2>&1
+	elif command -v ruby >/dev/null 2>&1; then
+		ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$file" >/dev/null 2>&1
+	else
+		echo "audit-automerge-cascade: no YAML parser available (python3/PyYAML or ruby required)" >&2
+		return 1
+	fi
+}
+
+# Print the GH_TOKEN and merge-command line numbers for the one literal-block
+# run step that performs auto-merge. Comments and non-literal scalars cannot
+# become patch targets.
+merge_step_lines() {
+	awk '
+		{ lines[NR]=$0 }
+		END {
+			for (i=1; i<=NR; i++) {
+				line=lines[i]; code=line; sub(/[[:space:]]*#.*/, "", code)
+				if (code !~ /^[[:space:]]*run:[[:space:]]*\|[-+]?[[:space:]]*$/) continue
+				match(line, /^[[:space:]]*/); run_indent=RLENGTH
+				merge=0
+				for (j=i+1; j<=NR; j++) {
+					match(lines[j], /^[[:space:]]*/); indent=RLENGTH
+					if (lines[j] !~ /^[[:space:]]*$/ && indent <= run_indent) break
+					body=lines[j]; sub(/[[:space:]]*#.*/, "", body)
+					if (body ~ /gh[[:space:]]+pr[[:space:]]+merge/) { merge=j; break }
+				}
+				if (!merge) continue
+				step=1
+				for (j=i-1; j>=1; j--) if (lines[j] ~ /^[[:space:]]*-[[:space:]]/) { step=j; break }
+				env=0
+				for (j=step; j<i; j++) if (lines[j] ~ /GH_TOKEN:[[:space:]]*\$\{\{[[:space:]]*secrets\.GITHUB_TOKEN[[:space:]]*\}\}/) env=j
+				if (env) { print env, merge; exit }
+			}
+		}
+	' "$1"
 }
 
 if [[ -n "$PATCH_FILE" ]]; then
@@ -134,10 +178,14 @@ workflow_body() {
 
 merge_step_token() {
 	awk '
+		/^[[:space:]]*-[[:space:]]/ { token="" }
 		/GH_TOKEN:[[:space:]]*\$\{\{[[:space:]]*secrets\.[A-Za-z0-9_]+[[:space:]]*\}\}/ {
 			x=$0; sub(/^.*secrets\./,"",x); sub(/[[:space:]]*\}\}.*$/,"",x); token="secrets." x
 		}
-		/gh[[:space:]]+pr[[:space:]]+merge/ {print token; exit}
+		{
+			code=$0; sub(/[[:space:]]*#.*/, "", code)
+			if (code ~ /gh[[:space:]]+pr[[:space:]]+merge/) { print token; exit }
+		}
 	'
 }
 

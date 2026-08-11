@@ -28,6 +28,47 @@ echo broken >"$S/broken.yml"
 set +e; "$SUT" --patch-workflow "$S/broken.yml" >/dev/null; rc=$?; set -e
 [[ $rc -eq 3 ]] || exit 1
 
+# A prose comment mentioning the command is ignored; the real merge step is patched.
+cat >"$S/comment.yml" <<'EOF'
+# This workflow uses gh pr merge --auto after its policy gate.
+jobs:
+  merge:
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "$PR_URL" --auto --squash
+EOF
+"$SUT" --patch-workflow "$S/comment.yml" >/dev/null || exit 1
+grep -qF '# This workflow uses gh pr merge --auto' "$S/comment.yml" || exit 1
+
+# Only the token belonging to the merge step is rewritten.
+cat >"$S/two-step.yml" <<'EOF'
+jobs:
+  merge:
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr edit "$PR_URL" --add-label ready
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "$PR_URL" --auto --squash
+EOF
+"$SUT" --patch-workflow "$S/two-step.yml" >/dev/null || exit 1
+[[ "$(grep -cF 'GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$S/two-step.yml")" -eq 1 ]] || exit 1
+
+# Folded scalars are refused because injected shell newlines would be folded.
+cat >"$S/folded.yml" <<'EOF'
+env:
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+run: >
+  gh pr merge "$PR_URL" --auto --squash
+EOF
+set +e; "$SUT" --patch-workflow "$S/folded.yml" >/dev/null; rc=$?; set -e
+[[ $rc -eq 3 ]] || exit 1
+
 # Inline run commands are refused rather than rewritten into invalid YAML.
 cat >"$S/inline.yml" <<'EOF'
 env:
@@ -75,4 +116,4 @@ EOF
 "$SUT" --patch-workflow "$S/canonical-old.yml" >/dev/null || exit 1
 sed 's/{{SECRET_NAME}}/AUTOMERGE_PAT/g' "$ROOT/plugins/dev/templates/github-actions/auto-merge.yml.template" >"$S/rendered.yml"
 cmp -s "$S/canonical-old.yml" "$S/rendered.yml" || exit 1
-echo '10 passed, 0 failed'
+echo '16 passed, 0 failed'

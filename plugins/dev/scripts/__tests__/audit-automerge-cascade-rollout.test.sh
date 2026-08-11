@@ -36,5 +36,11 @@ grep -qF 'org/repo: opened' "$S/fix-out" || exit 1
 [[ "$(grep -c '^pr create' "$S/calls")" -eq 1 ]] || exit 1
 git --git-dir="$S/origin.git" show catalyst/cat-151-automerge-cascade:.github/workflows/auto-merge.yml >"$S/patched.yml"
 grep -qF 'AUTOMERGE_PAT:' "$S/patched.yml" || exit 1
-ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$S/patched.yml" || exit 1
+if python3 -c 'import yaml' >/dev/null 2>&1; then
+	python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]))' "$S/patched.yml" || exit 1
+elif command -v ruby >/dev/null 2>&1; then
+	ruby -e 'require "yaml"; YAML.load_file(ARGV.fetch(0))' "$S/patched.yml" || exit 1
+else
+	echo 'skip: no YAML parser available'
+fi
 echo '6 passed, 0 failed'

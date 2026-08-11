@@ -11,6 +11,7 @@ contains() { grep -qF "$2" "$1"; }
 mkdir -p "$SCRATCH/fixtures/org/vanity" "$SCRATCH/fixtures/org/fixed" "$SCRATCH/fixtures/org/none"
 cat >"$SCRATCH/fixtures/org/vanity/auto-merge.yml" <<'EOF'
 name: Auto-Merge
+# A header may describe gh pr merge --auto without being the merge step.
 jobs:
   merge:
     env:
