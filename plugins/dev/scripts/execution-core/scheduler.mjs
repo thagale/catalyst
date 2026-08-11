@@ -3987,7 +3987,10 @@ export function emitFenceSuppressedOnce(
       host: self,
       reason: "fence-suppressed",
     });
-    if (ok !== false) writeFileSync(marker, "");
+    if (ok !== false) {
+      mkdirSync(dirname(marker), { recursive: true });
+      writeFileSync(marker, "");
+    }
   } catch (err) {
     log.warn(
       { ticket, site, err: err.message },

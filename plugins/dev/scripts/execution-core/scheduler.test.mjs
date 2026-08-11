@@ -121,6 +121,16 @@ describe("emitFenceSuppressedOnce", () => {
     ]);
   });
 
+  test("creates a missing worker directory before marking the emit", () => {
+    const calls = [];
+    const emit = (payload) => { calls.push(payload); return true; };
+    for (let i = 0; i < 3; i += 1) {
+      emitFenceSuppressedOnce(dir, "CAT-3", "ctl-925-cycle", "host-a", emit);
+    }
+    expect(calls).toHaveLength(1);
+    expect(existsSync(join(dir, "workers", "CAT-3", ".escalation-fence-suppressed-ctl-925-cycle.applied"))).toBe(true);
+  });
+
   test("does not write a marker when the emitter returns false or throws", () => {
     mkdirSync(join(dir, "workers", "CAT-3"), { recursive: true });
     emitFenceSuppressedOnce(dir, "CAT-3", "terminal-sweep", "host-a", () => false);
