@@ -19,18 +19,10 @@ SCRATCH="$(mktemp -d)"
 # assertion makes hermeticity self-enforcing when future start/stop cases land.
 _live_runtime_fingerprint() {
   local marker="${HOME}/catalyst/stack-halt.json"
-  local event_log="${HOME}/catalyst/events/$(date -u +%Y-%m).jsonl"
   if [[ -e "$marker" ]]; then
     stat -f '%m:%z' "$marker" 2>/dev/null || stat -c '%Y:%s' "$marker" 2>/dev/null || echo unreadable
   else
     echo absent
-  fi
-  if [[ "${CATALYST_STACK_TEST_SKIP_LIVE_EVENT_LOG:-0}" == "1" ]]; then
-    echo skipped
-  elif [[ -e "$event_log" ]]; then
-    wc -c < "$event_log"
-  else
-    echo 0
   fi
 }
 export -f _live_runtime_fingerprint

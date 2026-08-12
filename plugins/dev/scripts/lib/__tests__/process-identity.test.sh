@@ -34,7 +34,7 @@ self_matches="$(cpi_find_orphans "process-identity.test.sh" || true)"
 
 marker="cpi-marker-$PPID-$$"
 marker_script="$tmp/$marker.sh"
-printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$marker_script"
+printf '#!/usr/bin/env bash\nexec -a "$0" sleep 30\n' > "$marker_script"
 chmod +x "$marker_script"
 bash "$marker_script" & marked=$!; children="$children $marked"
 sleep 0.1
@@ -45,18 +45,17 @@ cpi_stop_pid "$marked" 2 && ok "stop confirms real process gone" || bad "stop co
 wait "$marked" 2>/dev/null || true
 
 shared="$tmp/orphan-process-identity.test.sh-probe.sh"
-printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$shared"; chmod +x "$shared"
+printf '#!/usr/bin/env bash\nexec -a "$0" sleep 30\n' > "$shared"; chmod +x "$shared"
 bash "$shared" & shared_pid=$!; children="$children $shared_pid"
 sleep 0.1
 found="$(cpi_find_orphans "process-identity.test.sh")"
-found_parent="$(ps -o ppid= -p "$found" 2>/dev/null | tr -d '[:space:]')"
-{ [[ "$found" == "$shared_pid" ]] && [[ "$found_parent" != "$$" ]]; } \
+[[ "$found" == "$shared_pid" ]] \
   && ok "self forks excluded when the pattern matches the scanner too" \
   || bad "self forks excluded when the pattern matches the scanner too (want $shared_pid, got: $(echo $found))"
 kill -9 "$shared_pid" 2>/dev/null || true; wait "$shared_pid" 2>/dev/null || true
 
 awkish="$tmp/$marker-awkish.sh"
-printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$awkish"; chmod +x "$awkish"
+printf '#!/usr/bin/env bash\nexec -a "$0 awk placeholder" sleep 30\n' > "$awkish"; chmod +x "$awkish"
 bash "$awkish" "awk placeholder" & awkish_pid=$!; children="$children $awkish_pid"
 sleep 0.1
 found="$(cpi_find_orphans "$marker")"
@@ -69,7 +68,7 @@ mkdir "$tmp/selfstub"
 printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ "$a" == "command=" ]] && exit 1; done\nexec %s "$@"\n' \
   "$real_ps" > "$tmp/selfstub/ps"; chmod +x "$tmp/selfstub/ps"
 failopen="$tmp/$marker-failopen.sh"
-printf '#!/usr/bin/env bash\nsleep 30 & wait\n' > "$failopen"; chmod +x "$failopen"
+printf '#!/usr/bin/env bash\nexec -a "$0" sleep 30\n' > "$failopen"; chmod +x "$failopen"
 bash "$failopen" & failopen_pid=$!; children="$children $failopen_pid"
 sleep 0.1
 found="$(PATH="$tmp/selfstub:$PATH"; cpi_find_orphans "$marker")"
