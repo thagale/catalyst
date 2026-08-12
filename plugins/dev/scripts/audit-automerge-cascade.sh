@@ -205,8 +205,24 @@ pipeline_kind() {
 	echo "$found"
 }
 
+# Rank a classification so the worst merge-performing workflow in a repo is the
+# one reported. A repo may hold several: an unrelated helper on a PAT alongside
+# the real auto-merge still wired to GITHUB_TOKEN. Reporting whichever sorted
+# first certified such a repo clean and made --rollout skip it forever, so the
+# audit missed exactly the breakage it exists to find.
+classify_rank() {
+	case "$1" in
+	suppressed) echo 4 ;;
+	suppressed-inert) echo 3 ;;
+	unknown) echo 2 ;;
+	*) echo 1 ;;
+	esac
+}
+
 classify_repo() {
-	local repo="$1" file="" path body="" token="" status pipelines listing
+	local repo="$1" path body="" token="" status pipelines listing
+	local -a files=() tokens=()
+	local best_file="" best_token="" best_status="" best_rank=0 rank i
 	if ! listing="$("$GH" api "repos/${repo}/contents/.github/workflows" --jq '.[].path' 2>/dev/null)"; then
 		printf '%s\t\t\tunknown\tunknown\n' "$repo"
 		return
@@ -217,21 +233,30 @@ classify_repo() {
 			printf '%s\t%s\t\tunknown\tunknown\n' "$repo" "${path##*/}"
 			return
 		fi
-		if grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' <<<"$body"; then file="${path##*/}"; break; fi
+		if grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' <<<"$body"; then
+			files+=("${path##*/}")
+			tokens+=("$(merge_step_token <<<"$body")")
+		fi
 	done <<<"$listing"
-	if [[ -z "$file" ]]; then printf '%s\t\t\tnot-applicable\tnone\n' "$repo"; return; fi
-	token="$(merge_step_token <<<"$body")"
+	if [[ ${#files[@]} -eq 0 ]]; then printf '%s\t\t\tnot-applicable\tnone\n' "$repo"; return; fi
 	pipelines="$(pipeline_kind "$repo")"
 	if [[ "$pipelines" == unknown ]]; then
-		printf '%s\t%s\t%s\tunknown\tunknown\n' "$repo" "$file" "$token"
+		printf '%s\t%s\t%s\tunknown\tunknown\n' "$repo" "${files[0]}" "${tokens[0]}"
 		return
 	fi
-	case "$token" in
-	secrets.GITHUB_TOKEN) [[ "$pipelines" == none ]] && status=suppressed-inert || status=suppressed ;;
-	secrets.*) status=ok ;;
-	*) status=unknown ;;
-	esac
-	printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$file" "$token" "$status" "$pipelines"
+	for ((i = 0; i < ${#files[@]}; i++)); do
+		token="${tokens[$i]}"
+		case "$token" in
+		secrets.GITHUB_TOKEN) [[ "$pipelines" == none ]] && status=suppressed-inert || status=suppressed ;;
+		secrets.*) status=ok ;;
+		*) status=unknown ;;
+		esac
+		rank="$(classify_rank "$status")"
+		if [[ $rank -gt $best_rank ]]; then
+			best_rank=$rank best_file="${files[$i]}" best_token="$token" best_status="$status"
+		fi
+	done
+	printf '%s\t%s\t%s\t%s\t%s\n' "$repo" "$best_file" "$best_token" "$best_status" "$pipelines"
 }
 
 emit_audit() {
