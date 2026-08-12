@@ -14,10 +14,42 @@ MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 FAILURES=0
 PASSES=0
 SCRATCH="$(mktemp -d)"
-# CAT-264: keep --print fixtures outside linked worktrees/temp roots so the
-# CTL-1473 production guard does not mask host-name rendering assertions.
-mkdir -p "${HOME}/catalyst"
-BAKE="$(mktemp -d "${HOME}/catalyst/.catalyst-stack-test.XXXXXX")"
+
+# CAT-264: snapshot the operator's real runtime before any test runs. The final
+# assertion makes hermeticity self-enforcing when future start/stop cases land.
+_live_runtime_fingerprint() {
+  local marker="${HOME}/catalyst/stack-halt.json"
+  local event_log="${HOME}/catalyst/events/$(date -u +%Y-%m).jsonl"
+  if [[ -e "$marker" ]]; then
+    stat -f '%m:%z' "$marker" 2>/dev/null || stat -c '%Y:%s' "$marker" 2>/dev/null || echo unreadable
+  else
+    echo absent
+  fi
+  if [[ "${CATALYST_STACK_TEST_SKIP_LIVE_EVENT_LOG:-0}" == "1" ]]; then
+    echo skipped
+  elif [[ -e "$event_log" ]]; then
+    wc -c < "$event_log"
+  else
+    echo 0
+  fi
+}
+export -f _live_runtime_fingerprint
+LIVE_MARKER_SNAPSHOT="${SCRATCH}/live-runtime.snapshot"
+_live_runtime_fingerprint > "$LIVE_MARKER_SNAPSHOT"
+
+# CAT-264: every start/stop/restart case invokes the real catalyst-stack, which
+# post-CAT-163 writes or clears the operator halt marker, appends unified events,
+# and may stop runtime processes under ${CATALYST_DIR:-$HOME/catalyst}. Scope the
+# entire suite once so future cases inherit the same hermetic boundary.
+export CATALYST_DIR="${SCRATCH}/catalyst"
+mkdir -p "${CATALYST_DIR}"
+
+# Keep --print fixtures outside linked worktrees/temp roots so the CTL-1473
+# production guard does not mask host-name rendering assertions, without
+# littering the live $HOME/catalyst runtime directory.
+BAKE_ROOT="${CATALYST_STACK_TEST_BAKE_ROOT:-${HOME}/.cache/catalyst-stack-tests}"
+mkdir -p "${BAKE_ROOT}"
+BAKE="$(mktemp -d "${BAKE_ROOT}/bake.XXXXXX")"
 mkdir -p "${BAKE}/log-shipper"
 cp "${REPO_ROOT}/plugins/dev/scripts/log-shipper/config.alloy" "${BAKE}/log-shipper/config.alloy"
 trap 'rm -rf "$SCRATCH" "$BAKE"' EXIT
@@ -712,6 +744,10 @@ run "stop leaves the launchd-managed shipper running when its plist is present" 
   fh='${SCRATCH}/defer_home2'; mkdir -p \"\$fh/Library/LaunchAgents\" \"\$fh/catalyst\";
   printf '<plist/>' > \"\$fh/Library/LaunchAgents/ai.coalesce.catalyst-log-shipper.plist\";
   PATH='${STUBDIR}:${REAL_PATH}' HOME=\"\$fh\" '${STACK}' stop 2>&1 | grep -q 'leaving it running'
+"
+
+run "suite is hermetic: no writes to the live CATALYST_DIR" bash -c "
+  test \"\$(cat '${LIVE_MARKER_SNAPSHOT}')\" = \"\$(_live_runtime_fingerprint)\"
 "
 
 # ── Summary ───────────────────────────────────────────────────────────────────
