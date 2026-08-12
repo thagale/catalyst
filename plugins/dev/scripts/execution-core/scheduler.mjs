@@ -7722,13 +7722,29 @@ export function schedulerTick(
   const repullConfig = readStalledRepullConfig(env);
   const repullMode = repullConfig.mode;
   if (repullMode !== "off") {
-    for (const skip of skips.filter((entry) => entry.class === "machine-owned")) {
+    const machineOwned = skips.filter((entry) => entry.class === "machine-owned");
+    // CAT-223: only-on-change emission, mirroring the lastSkipEmit guard above. The
+    // non-terminal repull outcomes (`would-detach` above all — shadow is the DEFAULT
+    // mode) re-evaluate to the same answer on every tick and nothing in the shadow path
+    // mutates the attempt marker, so an undeduped emit is an unbounded per-ticket event
+    // stream against SCHEDULER_RUNAWAY_THRESHOLD. Keyed ticket → outcome so a genuine
+    // outcome CHANGE still emits.
+    const machineOwnedNow = new Set(machineOwned.map((entry) => entry.ticket));
+    for (const ticket of lastRepullEmit.keys()) {
+      if (!machineOwnedNow.has(ticket)) lastRepullEmit.delete(ticket);
+    }
+    const emitRepullOnce = (ticket, payload) => {
+      if (lastRepullEmit.get(ticket) === payload.outcome) return;
+      lastRepullEmit.set(ticket, payload.outcome);
+      appendStalledRepullEvent(payload);
+    };
+    for (const skip of machineOwned) {
       try {
         const workerDir = join(orchDir, "workers", skip.ticket);
         const signalFiles = readdirSync(workerDir).filter(isPhaseSignalName);
         const signals = readPhaseSignals(orchDir, skip.ticket);
         if (Object.keys(signals).length !== signalFiles.length) {
-          appendStalledRepullEvent({
+          emitRepullOnce(skip.ticket, {
             ticket: skip.ticket,
             orchId: skip.ticket,
             mode: repullMode,
@@ -7747,8 +7763,17 @@ export function schedulerTick(
         const backoffOk =
           attempt.lastRepullAt == null ||
           currentMs - attempt.lastRepullAt >= repullConfig.repullBackoffMs;
+        // CAT-223: judge the verdict on REAL pipeline phases only. livePhaseEntries
+        // deliberately RETAINS unknown/non-pipeline signals (its exemption #1 — a
+        // `recovery-pass` inspection artifact carries no pipeline ordering, so it neither
+        // supersedes nor is superseded), but isStalledRepullable's first gate rejects any
+        // status outside {stalled,failed,aborted} and `done` is not in that set. Left
+        // unfiltered, a single `recovery-pass: done` artifact vetoes the repull of every
+        // ticket board-health has ever inspected — reintroducing the exact permanent
+        // strand this seam exists to clear, for precisely its target population.
+        const pipelineSignals = Object.fromEntries(live.filter(([phase]) => isKnownPhase(phase)));
         const verdict = isStalledRepullable({
-          signals: Object.fromEntries(live),
+          signals: pipelineSignals,
           class: skip.class,
           bgProtected: rawSignals.some((raw) =>
             raw?.bg_job_id ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive) : false
@@ -7759,45 +7784,105 @@ export function schedulerTick(
         });
         if (verdict.ok && backoffOk) {
           if (repullMode === "enforce") {
+            // CAT-223: in-flight guard. Production `removeLabel` is async, so onSettled
+            // fires AFTER schedulerTick has returned, across a Linear round-trip. Without
+            // this set the next tick re-evaluates the same still-present dir and issues a
+            // second clear+detach while the first is still settling — and neither the
+            // attempt cap nor the backoff can bound it, because both are only written
+            // inside onSettled.
+            if (pendingRepull.has(skip.ticket)) continue;
+            pendingRepull.add(skip.ticket);
             clearStalledLabel(orchDir, skip.ticket, "needs-human", writeStatus, {
               onSettled: (confirmed) => {
-                if (!confirmed) {
-                  appendStalledRepullEvent({
-                    ticket: skip.ticket,
-                    orchId: skip.ticket,
-                    mode: repullMode,
-                    outcome: "label-clear-unconfirmed",
-                    reason: verdict.reason,
-                  });
-                  return;
-                }
                 try {
-                  recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
-                  detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
-                  appendStalledRepullEvent({
-                    ticket: skip.ticket,
-                    orchId: skip.ticket,
-                    mode: repullMode,
-                    outcome: "detached",
-                    reason: verdict.reason,
-                  });
-                } catch (error) {
-                  appendStalledRepullEvent({
-                    ticket: skip.ticket,
-                    orchId: skip.ticket,
-                    mode: repullMode,
-                    outcome: "detach-failed",
-                    reason: error?.code ?? "detach-error",
-                  });
-                  log.warn(
-                    { ticket: skip.ticket, error: String(error) },
-                    "scheduler: confirmed-label stalled repull failed closed (CAT-223)"
-                  );
+                  if (!confirmed) {
+                    emitRepullOnce(skip.ticket, {
+                      ticket: skip.ticket,
+                      orchId: skip.ticket,
+                      mode: repullMode,
+                      outcome: "label-clear-unconfirmed",
+                      reason: verdict.reason,
+                    });
+                    return;
+                  }
+                  try {
+                    // CAT-223: re-assert the live-handle gate IMMEDIATELY before the
+                    // destructive rename, not merely before the label write that preceded
+                    // it — repo precedent (worktree salvage-before-destroy) is explicit
+                    // that the Linear round-trip widens the window a redispatch or a newly
+                    // live bg worker can appear in.
+                    const freshFiles = readdirSync(workerDir).filter(isPhaseSignalName);
+                    const freshSignals = readPhaseSignals(orchDir, skip.ticket);
+                    if (Object.keys(freshSignals).length !== freshFiles.length) {
+                      throw Object.assign(new Error("unreadable-phase-signal"), {
+                        code: "REVALIDATE_MALFORMED",
+                      });
+                    }
+                    const freshRaw = freshFiles
+                      .map((name) => readPhaseSignalRaw(orchDir, skip.ticket, name.slice(6, -5)))
+                      .filter(Boolean);
+                    const freshVerdict = isStalledRepullable({
+                      signals: Object.fromEntries(
+                        livePhaseEntries(freshSignals).filter(([phase]) => isKnownPhase(phase))
+                      ),
+                      class: skip.class,
+                      bgProtected: freshRaw.some((raw) =>
+                        raw?.bg_job_id
+                          ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive)
+                          : false
+                      ),
+                      // Deliberately the ORIGINAL mtime, not a fresh stat. This tick's own
+                      // label write lands inside workers/<ticket>/ and bumps the dir mtime,
+                      // so a re-stat here would report ageMs≈0 and fail every enforce
+                      // attempt as `inside-grace` forever — the gate defeating itself with
+                      // its own side effect. Staleness was legitimately established at
+                      // decision time; what actually needs re-deriving are the race-sensitive
+                      // inputs below (a redispatch's fresh signal, a newly live bg worker),
+                      // and those are read fresh.
+                      ageMs: currentMs - dirStat.mtimeMs,
+                      attempts: readRepullAttempts(orchDir, skip.ticket).attempts,
+                      opts: repullConfig,
+                    });
+                    if (!freshVerdict.ok) {
+                      emitRepullOnce(skip.ticket, {
+                        ticket: skip.ticket,
+                        orchId: skip.ticket,
+                        mode: repullMode,
+                        outcome: "revalidate-failed",
+                        reason: freshVerdict.reason,
+                      });
+                      return;
+                    }
+                    recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
+                    detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
+                    lastRepullEmit.delete(skip.ticket);
+                    appendStalledRepullEvent({
+                      ticket: skip.ticket,
+                      orchId: skip.ticket,
+                      mode: repullMode,
+                      outcome: "detached",
+                      reason: verdict.reason,
+                    });
+                  } catch (error) {
+                    emitRepullOnce(skip.ticket, {
+                      ticket: skip.ticket,
+                      orchId: skip.ticket,
+                      mode: repullMode,
+                      outcome: "detach-failed",
+                      reason: error?.code ?? "detach-error",
+                    });
+                    log.warn(
+                      { ticket: skip.ticket, error: String(error) },
+                      "scheduler: confirmed-label stalled repull failed closed (CAT-223)"
+                    );
+                  }
+                } finally {
+                  pendingRepull.delete(skip.ticket);
                 }
               },
             });
           } else {
-            appendStalledRepullEvent({
+            emitRepullOnce(skip.ticket, {
               ticket: skip.ticket,
               orchId: skip.ticket,
               mode: repullMode,
@@ -8688,6 +8773,15 @@ const observedYieldFiles = new Set();
 const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
 const lastSkipEmit = new Map();
+// CAT-223: last-emitted stalled-repull outcome per ticket, so a non-terminal repull
+// outcome fires only-on-change rather than every tick. Mirrors lastSkipEmit; keyed
+// ticket → outcome. Pruned when a ticket leaves the machine-owned skip set and deleted
+// on a successful detach. Cleared on daemon restart (via __resetForTests).
+const lastRepullEmit = new Map();
+// CAT-223: tickets whose clear+detach is in flight. clearStalledLabel's production
+// removeLabel is async, so onSettled lands after schedulerTick returns; this set stops
+// the next tick from issuing a second destructive pass on the same worker dir.
+const pendingRepull = new Set();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
 const HOLD_RELOG_EVERY = 10;
@@ -9980,6 +10074,8 @@ export function __resetForTests() {
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
   lastHoldLogged.clear();
   lastSkipEmit.clear();
+  lastRepullEmit.clear(); // CAT-223: reset stalled-repull only-on-change dedup
+  pendingRepull.clear(); // CAT-223: reset in-flight repull guard
   starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests

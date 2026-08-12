@@ -6956,6 +6956,116 @@ describe("CAT-223: stalled worker repull integration", () => {
     );
   });
 
+  // The headline behavior: an ASYNC removeLabel (the real production shape —
+  // linear-write.mjs's removeLabel returns a promise, so clearStalledLabel takes its
+  // `res.then(finalize)` branch) must actually detach the dir into .repulled/.
+  test("enforce detaches the worker dir on a confirmed async label clear", async () => {
+    const ticket = "CAT-223-DETACH";
+    const dir = seedStalled(ticket);
+    const repulled = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      writeStatus: { removeLabel: async () => ({ removed: true }) },
+      env: { CATALYST_STALLED_REPULL: "enforce" },
+      now: () => 60 * 60_000,
+    });
+    // onSettled lands after the promise resolves — i.e. after schedulerTick returned.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(repulled.calls).toContainEqual(expect.objectContaining({ outcome: "detached" }));
+    expect(existsSync(dir)).toBe(false);
+    expect(
+      readdirSync(join(orchDir, ".repulled")).some((name) => name.startsWith(`${ticket}-`))
+    ).toBe(true);
+  });
+
+  // Shadow is the DEFAULT mode and nothing in it mutates the attempt marker, so an
+  // undeduped would-detach re-emits forever. Assert the only-on-change guard holds.
+  test("shadow emits would-detach once, not once per tick", () => {
+    const ticket = "CAT-223-SHADOW";
+    seedStalled(ticket);
+    const repulled = spy();
+    const opts = {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      env: { CATALYST_STALLED_REPULL: "shadow" },
+      now: () => 60 * 60_000,
+    };
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    schedulerTick(orchDir, opts);
+    const wouldDetach = repulled.calls.filter((c) => c.outcome === "would-detach");
+    expect(wouldDetach).toHaveLength(1);
+  });
+
+  // The seam's target population: any ticket board-health has inspected carries a
+  // `recovery-pass` artifact. That non-pipeline signal must not veto the repull.
+  test("a recovery-pass artifact does not veto a machine-owned repull", () => {
+    const ticket = "CAT-223-ANCILLARY";
+    seedStalled(ticket);
+    writeSignalRaw(ticket, "recovery-pass", {
+      ticket,
+      phase: "recovery-pass",
+      status: "done",
+    });
+    utimesSync(join(orchDir, "workers", ticket), new Date(0), new Date(0));
+    const repulled = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      env: { CATALYST_STALLED_REPULL: "shadow" },
+      now: () => 60 * 60_000,
+    });
+    expect(repulled.calls).toContainEqual(expect.objectContaining({ outcome: "would-detach" }));
+  });
+
+  test("backoff suppresses a repull inside the window", () => {
+    const ticket = "CAT-223-BACKOFF";
+    seedStalled(ticket);
+    mkdirSync(join(orchDir, ".stalled-repull"), { recursive: true });
+    writeFileSync(
+      join(orchDir, ".stalled-repull", `${ticket}.json`),
+      JSON.stringify({ attempts: 1, lastRepullAt: 60 * 60_000 - 1_000 })
+    );
+    const repulled = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      env: { CATALYST_STALLED_REPULL: "shadow" },
+      now: () => 60 * 60_000,
+    });
+    expect(repulled.calls.filter((c) => c.outcome === "would-detach")).toHaveLength(0);
+  });
+
+  test("repullMode off short-circuits entirely", () => {
+    const ticket = "CAT-223-OFF";
+    seedStalled(ticket);
+    const repulled = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(ticket),
+      liveBackgroundCount: () => 0,
+      hasTriageArtifact: () => true,
+      appendDispatchSkippedEvent: () => true,
+      appendStalledRepullEvent: repulled,
+      env: { CATALYST_STALLED_REPULL: "off" },
+      now: () => 60 * 60_000,
+    });
+    expect(repulled.calls).toHaveLength(0);
+  });
+
   test("malformed signal fails closed before detaching", () => {
     const ticket = "CAT-223-MALFORMED";
     const dir = seedStalled(ticket);
