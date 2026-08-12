@@ -2298,12 +2298,12 @@ run "T96: INVALID mode warns and falls back to shadow (never to enforce)" \
 # Per-run cap. 2001/2010/2011/2012 etc. are ineligible for other reasons, so the
 # cap fixture declares its own set of uniformly-eligible pids.
 _widen_clear
-export WIDEN_PS_ROWS="2101 1
-2102 1
-2103 1
-2104 1
-2105 1"
-export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
+export WIDEN_PS_ROWS="5002101 1
+5002102 1
+5002103 1
+5002104 1
+5002105 1"
+export WIDEN_FIXTURE_PIDS="5002101 5002102 5002103 5002104 5002105"
 run "T97: PER-RUN CAP — enforce kills at most SWEEP_PROC_WIDEN_MAX_KILLS, defers the rest" \
   bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_PROC_WIDEN_MAX_KILLS=2 bash '$SWEEP' > '${SCRATCH}/t97.out' 2>&1 \
     && test \"\$(wc -l < '${KILL_LOG}' | tr -d ' ')\" = '2' \
@@ -2312,12 +2312,12 @@ run "T97: PER-RUN CAP — enforce kills at most SWEEP_PROC_WIDEN_MAX_KILLS, defe
 # Shadow must still report the FULL candidate set — the cap is what sizes the
 # operator's enforce decision, so capping the shadow report would hide it.
 _widen_clear
-export WIDEN_PS_ROWS="2101 1
-2102 1
-2103 1
-2104 1
-2105 1"
-export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
+export WIDEN_PS_ROWS="5002101 1
+5002102 1
+5002103 1
+5002104 1
+5002105 1"
+export WIDEN_FIXTURE_PIDS="5002101 5002102 5002103 5002104 5002105"
 # The assertion matches each fixture pid EXACTLY. `grep -c 'would kill 21'` was a
 # PREFIX match, so it also counted any unrelated pid beginning with "21" — and the
 # widened `ps` mock synthesizes extra rows from the REAL ancestor chain, whose pids
@@ -2326,12 +2326,12 @@ export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
 # exactly AND pinning the total is strictly STRONGER — truncation still fails it.
 run "T98: the cap does NOT truncate the shadow report (all 5 candidates logged)" \
   bash -c "SWEEP_PROC_WIDEN=shadow SWEEP_PROC_WIDEN_MAX_KILLS=2 bash '$SWEEP' > '${SCRATCH}/t98.out' 2>&1 \
-    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 2101 (' \
-    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 2102 (' \
-    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 2103 (' \
-    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 2104 (' \
-    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 2105 (' \
-    && test \"\$(grep -cE 'would kill 210[1-5] \\(' '${SCRATCH}/t98.out')\" = '5' \
+    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 5002101 (' \
+    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 5002102 (' \
+    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 5002103 (' \
+    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 5002104 (' \
+    && expect_contains '${SCRATCH}/t98.out' '[shadow] would kill 5002105 (' \
+    && test \"\$(grep -cE 'would kill 500210[1-5] \\(' '${SCRATCH}/t98.out')\" = '5' \
     && ! test -s '${KILL_LOG}'"
 
 # Root-absent early bail. A renamed/unmounted $SWEEP_WT_ROOT makes EVERY cwd
@@ -2347,17 +2347,17 @@ run "T98: the cap does NOT truncate the shadow report (all 5 candidates logged)"
 # ONLY thing between this fixture and 5 SIGTERMs.
 WIDEN_ABSENT_ROOT="${SCRATCH}/wt_widen_ABSENT"   # deliberately NEVER created
 _widen_clear
-export WIDEN_PS_ROWS="2101 1
-2102 1
-2103 1
-2104 1
-2105 1"
-export WIDEN_FIXTURE_PIDS="2101 2102 2103 2104 2105"
-export WCWD_2101="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
-export WCWD_2102="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
-export WCWD_2103="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
-export WCWD_2104="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
-export WCWD_2105="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WIDEN_PS_ROWS="5002101 1
+5002102 1
+5002103 1
+5002104 1
+5002105 1"
+export WIDEN_FIXTURE_PIDS="5002101 5002102 5002103 5002104 5002105"
+export WCWD_5002101="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_5002102="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_5002103="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_5002104="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
+export WCWD_5002105="${WIDEN_ABSENT_ROOT}/evergreen/evr-23"
 run "T99: ROOT-ABSENT bail — a missing SWEEP_WT_ROOT kills nothing and says why" \
   bash -c "SWEEP_PROC_WIDEN=enforce SWEEP_WT_ROOT='${WIDEN_ABSENT_ROOT}' bash '$SWEEP' > '${SCRATCH}/t99.out' 2>&1 \
     && expect_contains '${SCRATCH}/t99.out' 'is absent — skipping' \
