@@ -730,6 +730,7 @@ jobs:
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             in-flight-supersede.test.mjs \
+            phase-signal-order.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \

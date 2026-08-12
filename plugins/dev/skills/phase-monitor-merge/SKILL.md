@@ -459,11 +459,12 @@ COMMS="${COMMS:-${PLUGIN_ROOT}/scripts/catalyst-comms}"
 # CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
 HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
 MERGE_ERR_FILE="$(mktemp)"
-# CTL-56: no --delete-branch — it triggers a local `git checkout <base>` that fails
-# inside a linked worktree when the base branch is already checked out in the
-# primary clone, and it auto-closes any OTHER open PR sharing this head branch
-# name (breaks the dual-PR courtesy-PR policy). Branch cleanup happens below,
-# checkout-free, via the REST ref-delete after the merge is confirmed.
+# CTL-56: deliberately no local branch-cleanup flag on this call — it triggers a
+# local `git checkout <base>` that fails inside a linked worktree when the base
+# branch is already checked out in the primary clone, and it auto-closes any
+# OTHER open PR sharing this head branch name (breaks the dual-PR courtesy-PR
+# policy). Branch cleanup happens below, checkout-free, via the REST ref-delete
+# after the merge is confirmed.
 if ! gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash 2>"$MERGE_ERR_FILE"; then
   MERGE_ERR="$(cat "$MERGE_ERR_FILE" 2>/dev/null || true)"
   rm -f "$MERGE_ERR_FILE"
