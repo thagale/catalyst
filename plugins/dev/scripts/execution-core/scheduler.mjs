@@ -75,6 +75,13 @@ import {
   NOT_DISPATCHABLE_LIVENESS_ANCHOR,
 } from "./dispatch-readiness.mjs";
 import { resolveAnchorIssueCached } from "./dispatch-exclusions.mjs";
+import { describeSkip, summarizeSkips, hasStarvingWork } from "./dispatch-skip.mjs";
+import {
+  isStalledRepullable,
+  detachWorkerDir,
+  readRepullAttempts,
+  recordRepullAttempt,
+} from "./stalled-repull.mjs";
 import {
   defaultDispatch,
   dispatchTicket,
@@ -218,6 +225,8 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
+  defaultAppendDispatchSkippedEvent,
+  defaultAppendStalledRepullEvent,
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
@@ -229,6 +238,7 @@ import {
   defaultAppendOrphanDetectedEvent,
   defaultAppendFenceSuppressedEvent,
   emitFenceSuppressedEventOnce,
+  gcFenceSuppressedEmits,
 } from "./recovery.mjs";
 import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-729: progress-watchdog imports.
@@ -358,6 +368,7 @@ import {
   readUnstuckSweepConfig,
   readRecoveryPassConfig,
   readBoardHealthConfig,
+  readStalledRepullConfig,
   readGithubQuotaBoardHealthConfig,
   readProductivityBoardHealthConfig,
   readReplicaBoardHealthConfig,
@@ -474,6 +485,12 @@ import {
   buildRemediateCapExplanation,
   coerceExplanation,
 } from "./escalation-explanation.mjs"; // CTL-1130
+import {
+  PRIOR_ARTIFACT_MISSING_EXIT_CODE,
+  PRIOR_ARTIFACT_MISSING_REASON,
+  buildPriorArtifactExplanationFields,
+  parseDispatchRefusal,
+} from "./prior-artifact-block.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1183,6 +1200,15 @@ export function readCurrentRunPrRepo(orchDir, ticket) {
   } catch {
     return null;
   }
+}
+
+export function isPhaseSignalName(name) {
+  const match = /^phase-(.+)\.json$/.exec(name);
+  return Boolean(match && !match[1].includes("-yield-"));
+}
+
+export function workerDirHasPhaseSignals(names) {
+  return (names ?? []).some(isPhaseSignalName);
 }
 
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
@@ -2933,7 +2959,7 @@ export function escalateDispatchExhausted(
   orchDir,
   ticket,
   phase,
-  { writeFile = writeFileSync, readFile = readFileSync, code = null, cause = null } = {}
+  { writeFile = writeFileSync, readFile = readFileSync, code = null, cause = null, refusal = null } = {}
 ) {
   const dir = join(orchDir, "workers", ticket);
   const p = join(dir, `phase-${phase}.json`);
@@ -2948,7 +2974,19 @@ export function escalateDispatchExhausted(
   // priority call the scheduler cannot compute (D7). GATE 1 passes (re-dispatch
   // is possible), no single dominant option → tie-break is human preference.
   let explanation;
-  const explanationFields = {
+  const artifactBlock =
+    code === PRIOR_ARTIFACT_MISSING_EXIT_CODE &&
+    cause === PRIOR_ARTIFACT_MISSING_REASON &&
+    typeof refusal?.artifactDir === "string" &&
+    refusal.artifactDir !== "";
+  const artifactExplanation = artifactBlock ? buildPriorArtifactExplanationFields({
+    ticket,
+    phase,
+    artifact: refusal.artifact,
+    artifactDir: refusal.artifactDir,
+    searchedPath: refusal.searchedPath,
+  }) : null;
+  const explanationFields = artifactExplanation ?? {
     escalation_type: "decision",
     problem: `${phase} dispatch retries exhausted (${cause ?? code})`,
     call_to_action: `${ticket}/${phase} dispatch has exhausted retries. Re-dispatch or abandon / re-scope?`,
@@ -2983,6 +3021,11 @@ export function escalateDispatchExhausted(
         stalledReason: "prior-artifact-retry-exhausted",
         dispatchFailureCode: code, // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
+        ...(artifactBlock ? {
+          dispatchFailureArtifact: refusal.artifact ?? null,
+          dispatchFailureArtifactDir: refusal.artifactDir,
+          dispatchFailureSearchedPath: refusal.searchedPath ?? null,
+        } : {}),
         explanation,
         needsHumanSince: existing.needsHumanSince ?? new Date().toISOString(), // CTL-1131: preserve prior stamp
         updatedAt: new Date().toISOString(),
@@ -3911,7 +3954,7 @@ function reconcileTerminalBackstop(
   }
   // Drift detected: force the forward Done write (the CTL-758 guard permits it).
   try {
-    const res = writeStatus.applyTerminalDone({ ticket, cache });
+    const res = writeStatus.applyTerminalDone({ ticket, cache, mergedWorkVerified: pr.number });
     if (typeof emitStateWrite === "function") {
       emitStateWrite({
         writerResult: res,
@@ -4094,7 +4137,7 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
 //      or an operator re-arms via orch-monitor respond-ticket. Storm-prevention is
 //      preserved — the marker is still written at most once; a failed clear is
 //      intentionally left re-armable (a future genuine escalation must get through).
-export function defaultClearStall(orchDir, writeStatus) {
+export function defaultClearStall(orchDir, writeStatus, { rmDir = rmSync } = {}) {
   return ({ ticket, phase }) => {
     if (!ticket || !phase) return false;
     const workerDir = join(orchDir, "workers", ticket);
@@ -4107,8 +4150,70 @@ export function defaultClearStall(orchDir, writeStatus) {
         "stall-janitor: stalled-signal delete failed (CTL-1005)"
       );
     }
-    // 2. clear the needs-human label; write the once-marker ONLY on confirmed removal
+    // 2. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
+    try {
+      rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
+    } catch {
+      /* best-effort */
+    }
+    try {
+      rmSync(join(workerDir, `.artifact-blocked-reply-${phase}.applied`), { force: true });
+    } catch {
+      /* best-effort */
+    }
+    // 3. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
+    //    stalled ticket starts a FRESH cycle — without this, a retried phase
+    //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
+    //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
+    try {
+      rmSync(join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`), { force: true });
+    } catch {
+      /* best-effort */
+    }
+    // 4. CTL-1643: clear the durable escalation record so the next same-episode
+    //    gate starts fresh. Without this, the labelAttempts > 0 guard in
+    //    escalateOnce suppresses the re-escalation event after the operator re-arms.
+    forgetDurableEscalation(orchDir, ticket);
+    // 5. CTL-1045 Bug 3 / CAT-24: never leave a marker-only worker dir after
+    // deleting its last real phase signal. Such residue holds no slot yet excludes
+    // the ticket from new-work dispatch. Tombstones are not real signals. Preserve
+    // a non-empty operator inbox: the daemon writes the reply before invoking this
+    // clear, and the re-dispatched worker must still be able to consume it.
+    const removeEmptyWorkerDir = () => {
+      try {
+        const names = readdirSync(workerDir);
+        let hasInbox = false;
+        if (names.includes("inbox.jsonl")) {
+          try {
+            hasInbox = statSync(join(workerDir, "inbox.jsonl")).size > 0;
+          } catch {
+            hasInbox = true; // unreadable inbox is evidence to fail closed
+          }
+        }
+        if (!workerDirHasPhaseSignals(names) && !hasInbox) {
+          rmDir(workerDir, { recursive: true, force: true });
+        }
+      } catch (err) {
+        if (err?.code !== "ENOENT") {
+          log.warn(
+            { ticket, phase, err: err?.message },
+            "stall-janitor: empty worker-dir removal failed (CAT-24)"
+          );
+        }
+      }
+    };
+    // 6. clear the needs-human label; write the once-marker ONLY on confirmed removal
     //    (CTL-1045 Bug 4 — a failed clear must NOT disarm future escalations).
+    //
+    //    CAT-24 (Codex P1): this runs LAST, and the empty-dir removal above hangs off
+    //    `onSettled`, because production's removeLabel is ASYNC. Deleting the dir
+    //    inline would (a) race the later `onRemoved`, which re-mkdirs the dir to write
+    //    `.janitor-cleared-<phase>.applied` and so recreates the exact marker-only
+    //    residue this is meant to eliminate, and (b) on a FAILED removal, delete
+    //    `.linear-label-needs-human.applied` while Linear still carries the label —
+    //    re-arming an escalation that was never actually cleared. So: only sweep the
+    //    dir once removal is CONFIRMED, and leave it in place otherwise (worker-dir-gc
+    //    reclaims it after retention).
     try {
       clearStalledLabel(orchDir, ticket, "needs-human", writeStatus, {
         onRemoved: () => {
@@ -4123,6 +4228,9 @@ export function defaultClearStall(orchDir, writeStatus) {
             );
           }
         },
+        onSettled: (confirmed) => {
+          if (confirmed) removeEmptyWorkerDir();
+        },
       });
     } catch (err) {
       log.warn(
@@ -4130,25 +4238,6 @@ export function defaultClearStall(orchDir, writeStatus) {
         "stall-janitor: needs-human clear failed (CTL-1005)"
       );
     }
-    // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
-    try {
-      rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
-    } catch {
-      /* best-effort */
-    }
-    // 4. CTL-1442: re-arm the escalation ask budget. An operator re-arming a
-    //    stalled ticket starts a FRESH cycle — without this, a retried phase
-    //    that no-progresses again hits the spent ask-cap (askCount >= cap) and
-    //    is suppressed without a fresh ask or re-stall (Codex P2 on #2590).
-    try {
-      rmSync(join(orchDir, ".escalation-cooldowns", `${ticket}-${phase}.json`), { force: true });
-    } catch {
-      /* best-effort */
-    }
-    // 5. CTL-1643: clear the durable escalation record so the next same-episode
-    //    gate starts fresh. Without this, the labelAttempts > 0 guard in
-    //    escalateOnce suppresses the re-escalation event after the operator re-arms.
-    forgetDurableEscalation(orchDir, ticket);
     return true;
   };
 }
@@ -4424,6 +4513,8 @@ export function schedulerTick(
     // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
     // (module-level set) so only the first observation per daemon lifetime fires.
     appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
+    appendDispatchSkippedEvent = defaultAppendDispatchSkippedEvent,
+    appendStalledRepullEvent = defaultAppendStalledRepullEvent,
     // CTL-705: preemption seams — injectable for tests, default to real helpers.
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
@@ -5174,7 +5265,16 @@ export function schedulerTick(
     }
 
     // rc != 0 — real dispatch failure.
-    const reason = readDispatchFailureReason(orchDir, ticket, phase) ?? "dispatch_nonzero_exit";
+    const refusal = parseDispatchRefusal(r.stdout);
+    // CAT-55 (Codex #3243 P2): the structured refusal describes THIS dispatch; the
+    // on-disk failureReason can only describe a PRIOR one. A prelaunch refusal means
+    // no worker ever launched, so it wrote no signal — any reason still on disk is
+    // stale by construction. Reading it first let a leftover reason mask the current
+    // `prior_artifact_missing` cause, and escalateDispatchExhausted gates its artifact
+    // metadata + manual explanation on that exact cause, so the operator lost both.
+    // Fall back to the on-disk reason only when this dispatch printed no refusal.
+    const reason =
+      refusal?.reason ?? readDispatchFailureReason(orchDir, ticket, phase) ?? "dispatch_nonzero_exit";
     // CTL-1004/CTL-1056 Bug 2: pull the captured stderr tail + spawn error/signal
     // off the dispatch result so the failure is diagnosable from BOTH the warn log
     // and the phase.dispatch.failed event (the old log was a bare {ticket,code}).
@@ -5182,7 +5282,7 @@ export function schedulerTick(
     const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now()); // CTL-624: arm the cool-down window
     if (fullFailureLadder) {
       if (cd.consecutiveFailures >= getMaxDispatchRetries())
-        escalateDispatchExhausted(orchDir, ticket, phase, { code: r.code, cause: reason }); // CTL-712 terminal stop; CTL-1045 Bug 2
+        escalateDispatchExhausted(orchDir, ticket, phase, { code: r.code, cause: reason, refusal }); // CTL-712 terminal stop; CTL-1045 Bug 2
       maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
       // CTL-611 Gap 2: surface the silent drop as an event. CTL-1056: + diag.
       appendDispatchFailedEvent({
@@ -5191,6 +5291,8 @@ export function schedulerTick(
         target_phase: phase,
         code: r.code,
         reason,
+        ...(refusal?.artifactDir ? { artifact_dir: refusal.artifactDir } : {}),
+        ...(refusal?.searchedPath ? { searched_path: refusal.searchedPath } : {}),
         expiresAt: cd.expiresAt,
         consecutiveFailures: cd.consecutiveFailures,
         ...diag,
@@ -8118,9 +8220,66 @@ export function schedulerTick(
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.
+  const startedTickets = _listStartedTickets(orchDir);
+  const skips = dispatchableReady
+    .filter((t) => startedTickets.has(t.identifier))
+    .map((t) => {
+      const signals = readPhaseSignals(orchDir, t.identifier);
+      const raw = {};
+      for (const phase of Object.keys(signals)) {
+        raw[phase] = readPhaseSignalRaw(orchDir, t.identifier, phase);
+      }
+      return { ticket: t.identifier, ...describeSkip({ signals, raw }) };
+    });
+  const skipSummary = summarizeSkips(skips, { cap: HELD_LOG_CAP });
+  const readyNow = new Set(ready.map((t) => t.identifier));
+  for (const ticket of lastSkipEmit.keys()) if (!readyNow.has(ticket)) lastSkipEmit.delete(ticket);
+  for (const skip of skips) {
+    if (lastSkipEmit.get(skip.ticket) !== skip.class) {
+      appendDispatchSkippedEvent({ ticket: skip.ticket, orchId: skip.ticket, descriptor: skip });
+      lastSkipEmit.set(skip.ticket, skip.class);
+    }
+  }
+
+  const repullConfig = readStalledRepullConfig(env);
+  const repullMode = repullConfig.mode;
+  if (repullMode !== "off") {
+    for (const skip of skips.filter((entry) => entry.class === "machine-owned")) {
+      try {
+        const signals = readPhaseSignals(orchDir, skip.ticket);
+        const live = livePhaseEntries(signals);
+        const raw = live.map(([phase]) => readPhaseSignalRaw(orchDir, skip.ticket, phase)).filter(Boolean).at(-1);
+        const dirStat = statSync(join(orchDir, "workers", skip.ticket));
+        const attempt = readRepullAttempts(orchDir, skip.ticket);
+        const currentMs = now();
+        const backoffOk = attempt.lastRepullAt == null || currentMs - attempt.lastRepullAt >= repullConfig.repullBackoffMs;
+        const verdict = isStalledRepullable({
+          signals: Object.fromEntries(live),
+          class: skip.class,
+          bgProtected: raw?.bg_job_id ? bgLivenessProtects(raw.bg_job_id, getAgents(), isBgJobAlive) : false,
+          ageMs: currentMs - dirStat.mtimeMs,
+          attempts: attempt.attempts,
+          opts: repullConfig,
+        });
+        if (verdict.ok && backoffOk) {
+          if (repullMode === "enforce") {
+            recordRepullAttempt(orchDir, skip.ticket, { now: currentMs });
+            detachWorkerDir(orchDir, skip.ticket, { now: currentMs });
+            startedTickets.delete(skip.ticket);
+            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "detached", reason: verdict.reason });
+          } else {
+            appendStalledRepullEvent({ ticket: skip.ticket, orchId: skip.ticket, mode: repullMode, outcome: "would-detach", reason: verdict.reason });
+          }
+        }
+      } catch (error) {
+        log.warn({ ticket: skip.ticket, error: String(error) }, "scheduler: stalled repull failed closed (CAT-223)");
+      }
+    }
+  }
+
   const selected = selectDispatchablePerProject(
     dispatchableReady,
-    _listStartedTickets(orchDir),
+    startedTickets,
     freeSlots,
     {
       perProject: concurrency?.perProject,
@@ -8790,6 +8949,7 @@ export function schedulerTick(
   for (const { ticket, phase } of gcDispatchCooldowns(orchDir, eligibleIds, now())) {
     appendCooldownGcEvent({ ticket, orchId: ticket, target_phase: phase });
   }
+  gcFenceSuppressedEmits(orchDir, now());
 
   const didWork =
     dispatched.length > 0 || advanced.length > 0 || promotedCount > 0 || resumedCount > 0;
@@ -8802,7 +8962,10 @@ export function schedulerTick(
   // in `ready`, so the intended wedge signal is preserved.
   // triagedWaitingReadyCount, NOT triagedWaitingCount — same reason, applied to
   // the other pool: a triaged waiter behind an open dependency is not starved.
-  const hasWaitingWork = ready.length > 0 || triagedWaitingReadyCount > 0;
+  const hasWaitingWork = hasStarvingWork({
+    readyIds: ready.map((t) => t.identifier),
+    skips,
+  }) || triagedWaitingReadyCount > 0;
   const starvation = nextStarvationState(starvationStreak, {
     didWork,
     freeSlots,
@@ -8823,6 +8986,10 @@ export function schedulerTick(
         triaged_waiting_ready: triagedWaitingReadyCount,
         held: heldReasons,
         admission_held: admissionHeld,
+        skipped: skipSummary.entries,
+        skipped_count: skipSummary.count,
+        skipped_operator_owned: skipSummary.operatorOwned,
+        dispatch_candidates: Math.max(0, ready.length - skipSummary.count),
       },
       "scheduler: board appears frozen — queued work cannot make progress (CAT-36)"
     );
@@ -9067,6 +9234,7 @@ const lastHeldEmitState = new Map();
 const lastHoldLogged = new Map();
 // Admission probe failures have an independent cadence from sweep 2 holds.
 const lastAdmissionProbeLogged = new Map();
+const lastSkipEmit = new Map();
 const STARVATION_WARN_STREAK = 3;
 const STARVATION_REWARN_EVERY = 10;
 const HOLD_RELOG_EVERY = 10;
@@ -10485,6 +10653,7 @@ export function __resetForTests() {
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
   lastHoldLogged.clear();
   lastAdmissionProbeLogged.clear();
+  lastSkipEmit.clear();
   starvationStreak = 0;
   lastDispositionEmit.clear(); // CTL-764 Phase 5: reset worker.transition only-on-change dedup
   _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests

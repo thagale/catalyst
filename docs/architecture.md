@@ -600,9 +600,48 @@ confirmed label application:
 New event names (registered in `broker/namespace-parity.test.mjs`): `escalation.explanation-absent`,
 `escalation.fence-suppressed`, `delegate.would-route`, `delegate.routed`,
 `delegate.route-fallback`. A fence suppression is a deliberate no-write;
-`escalation.fence-suppressed` makes that decision operator-visible instead of silent.
+`escalation.fence-suppressed` makes that decision operator-visible instead of silent. It emits at
+most once per `(ticket, site)` during `CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS` (15 minutes by
+default) and fails open when its marker is absent or malformed. Scheduler Pass 4 reaps
+`orchDir/.fence-suppressed-emits/` with a TTL equal to that window, so raising the emission window
+also raises marker retention.
+
+The stale-PR rescue escalation path is fence-guarded, but the daemon deliberately leaves its
+`gateway` seam latent. Threading the production gateway would make the authoritative fence read
+fail closed; an indeterminate Linear read such as a 401 could then silently suppress the human
+escalation. The timer's `self` value remains load-bearing both as the discriminator for a
+self-owned projection row and as the `host` dimension on `escalation.fence-suppressed`.
 
 ### Runaway-loop guards (CTL-671)
+
+#### Terminally-stalled worker dirs and the dispatch gap (CAT-223)
+
+New-work admission uses two independent predicates. `isTicketInFlight` is status-aware and releases
+a slot for `stalled`, `failed`, or `aborted` work. `listStartedTickets` is deliberately
+status-blind: a worker directory excludes its ticket from the new-work pull. Before CAT-223, a
+terminal stall could therefore free a slot while remaining permanently ineligible for that slot.
+
+The scheduler attributes these exclusions in the starvation diagnostic's `skipped[]` field. A stall
+is `operator-owned` when a human decision is outstanding, `machine-owned` when the dispatch
+machinery gave up, and `unknown` when the evidence cannot be classified. Operator-owned parks do
+not constitute dispatch starvation and are never automatically re-pulled. Machine-owned stalls keep
+the warning active and can enter the flag-gated reclaim seam. Unknown stalls fail closed.
+
+Board health records successful dispatch timestamps per ticket as well as retaining the historical
+board-wide timestamp. When attributed events are present, `dispatchLiveness` evaluates each old,
+owned eligible ticket independently, so unrelated work cannot mask a frozen slice. Old event formats
+without ticket attribution retain the board-wide fallback.
+
+The reclaim seam detaches an eligible machine-owned terminal worker directory to a retained
+`.repulled-<ticket>-<timestamp>` sibling before allowing a fresh pull. `off` disables evaluation,
+`shadow` reports candidates without mutation, and `enforce` performs the detach. The configuration
+schema and defaults are defined in the configuration reference under
+`catalyst.orchestration.stalledRepull`.
+
+The unified event namespace reserves `phase.scheduler.dispatch-skipped.<ticket>` and
+`phase.scheduler.stalled-repull.<ticket>` alongside
+`phase.scheduler.yield-file-skip.<ticket>`. In Loki, select the execution-core service and filter on
+the exact `event_name` structured-metadata value.
 
 `schedulerTick` is hardened against runaway dispatch/reclaim loops on phantom/non-resolving tickets
 (phantom CTL-9 once spammed ~24,560 `phase.*` events over 3 days, 92% per-tick `work-done-probe`
