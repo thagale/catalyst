@@ -52,14 +52,24 @@ render_template() {
 	sed "s/{{SECRET_NAME}}/${SECRET_NAME}/g" "$TEMPLATE"
 }
 
+# True when the merge step spanning [env_line, merge_line] ALREADY carries both
+# the PAT binding and the suppression warning. Deliberately scoped to that line
+# range: a file-wide grep let an unrelated job that merely mentions these strings
+# certify a workflow whose merge step still ran on GITHUB_TOKEN, so --rollout
+# reported 'already-current' and skipped the repo permanently while it was broken.
+merge_step_is_current() {
+	local file="$1" from="$2" to="$3"
+	awk -v from="$from" -v to="$to" -v secret="$SECRET_NAME" '
+		NR < from || NR > to { next }
+		index($0, "AUTOMERGE_PAT: ${{ secrets." secret " }}") { pat = 1 }
+		index($0, "::warning title=Auto-merge cascade suppressed::") { warn = 1 }
+		END { exit (pat && warn) ? 0 : 1 }
+	' "$file"
+}
+
 patch_workflow() {
 	local file="$1" tmp target env_line merge_line
 	grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' "$file" || { echo refused; return 3; }
-	if grep -qF "AUTOMERGE_PAT: \${{ secrets.${SECRET_NAME} }}" "$file" &&
-		grep -qF '::warning title=Auto-merge cascade suppressed::' "$file"; then
-		echo already-current
-		return 0
-	fi
 	# The patcher preserves repository-specific workflow policy and only expands
 	# an existing block-scalar merge command. Rewriting inline YAML safely would
 	# require a YAML-aware editor; fail closed instead of emitting invalid YAML.
@@ -67,6 +77,10 @@ patch_workflow() {
 	[[ -n "$target" ]] || { echo refused; return 3; }
 	read -r env_line merge_line <<<"$target"
 	[[ -n "$env_line" && -n "$merge_line" ]] || { echo refused; return 3; }
+	if merge_step_is_current "$file" "$env_line" "$merge_line"; then
+		echo already-current
+		return 0
+	fi
 	tmp="$(mktemp "${TMPDIR:-/tmp}/automerge-template.XXXXXX")" || return 3
 	# Modify only the merge step. Repository-specific triggers, authorization
 	# gates, dependencies, permissions, and adjacent steps are security policy.
@@ -92,10 +106,33 @@ patch_workflow() {
 			next
 		}
 		{print}
-	' "$file" >"$tmp"
+	' "$file" >"$tmp" || { rm -f "$tmp"; echo failed; return 3; }
 	if ! validate_yaml "$tmp"; then rm -f "$tmp"; echo refused; return 3; fi
 	if cmp -s "$file" "$tmp"; then rm -f "$tmp"; echo already-current; return 0; fi
-	if [[ $FIX -eq 1 || ( -n "$PATCH_FILE" && $PATCH_WRITE -eq 1 ) ]]; then mv "$tmp" "$file"; echo patched; else diff -u "$file" "$tmp" || true; rm -f "$tmp"; echo would-patch; fi
+	if [[ $FIX -eq 1 || ( -n "$PATCH_FILE" && $PATCH_WRITE -eq 1 ) ]]; then
+		# Fail CLOSED on the write. Without this the rename's status was discarded
+		# (the script runs without `set -e`), so a rename that could not happen —
+		# a read-only parent, a full disk — still printed the confident verdict
+		# 'patched' and returned 0 while the target was byte-identical, and the
+		# temp file leaked. --patch-workflow exits with this status directly, so
+		# there is no downstream net.
+		if ! mv "$tmp" "$file"; then rm -f "$tmp"; echo failed; return 3; fi
+		if ! patched_file_is_sound "$file"; then echo failed; return 3; fi
+		echo patched
+	else
+		diff -u "$file" "$tmp" || true
+		rm -f "$tmp"
+		echo would-patch
+	fi
+}
+
+# Post-write invariant: the workflow we just replaced must still be a non-empty
+# file that merges, and must have actually gained the PAT binding.
+patched_file_is_sound() {
+	local file="$1"
+	[[ -s "$file" ]] || return 1
+	grep -qE 'gh[[:space:]]+pr[[:space:]]+merge' "$file" || return 1
+	grep -qF "AUTOMERGE_PAT: \${{ secrets.${SECRET_NAME} }}" "$file" || return 1
 }
 
 validate_yaml() {
@@ -282,7 +319,7 @@ verify_repo() {
 }
 
 rollout_repo() {
-	local repo="$1" file="$2" status="$3" scratch branch marker open clone_url result
+	local repo="$1" file="$2" status="$3" scratch branch marker open clone_url result base_branch
 	case "$status" in
 	suppressed|suppressed-inert) ;;
 	ok|not-applicable) echo "$repo: skipped ($status)"; return 0 ;;
@@ -302,6 +339,13 @@ rollout_repo() {
 		rm -rf "$scratch"
 		return 0
 	fi
+	# Resolve the real default branch BEFORE anything touches the remote. The base
+	# was hardcoded to main, so on a master/develop/trunk repo `gh pr create` failed
+	# only AFTER the push had already landed a branch upstream — leaving an orphan
+	# that made every retry die at push — and a stale branch literally named main
+	# would have opened the PR against the wrong base entirely.
+	base_branch="$("$GH" repo view "$repo" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)"
+	[[ -n "$base_branch" ]] || { echo "$repo: failed (default branch)"; return 1; }
 	scratch="$(mktemp -d "${TMPDIR:-/tmp}/automerge-rollout.XXXXXX")" || return 1
 	clone_url="$("$GH" repo view "$repo" --json url --jq .url 2>/dev/null || true)"; [[ -n "$clone_url" ]] || clone_url="https://github.com/${repo}.git"
 	if ! git clone -q --depth 1 "$clone_url" "$scratch/repo"; then echo "$repo: failed (clone)"; rm -rf "$scratch"; return 1; fi
@@ -312,7 +356,7 @@ rollout_repo() {
 	git -C "$scratch/repo" add ".github/workflows/$file"
 	git -C "$scratch/repo" -c user.name=catalyst -c user.email=catalyst@localhost -c commit.gpgsign=false commit -q -m 'fix(ci): restore post-merge cascade (CAT-151)' || { rm -rf "$scratch"; return 1; }
 	git -C "$scratch/repo" push -q -u origin "$branch" || { echo "$repo: failed (push)"; rm -rf "$scratch"; return 1; }
-	"$GH" pr create --repo "$repo" --head "$branch" --base main --title 'fix(ci): restore post-merge cascade (CAT-151)' --body "$(printf '%s\n\n%s\n\n%s' "$marker" 'Use a PAT identity for auto-merge so push CI and workflow_run deploys cascade.' 'Falls back to GITHUB_TOKEN with a warning when the secret is unavailable.')" >/dev/null || { echo "$repo: failed (pr create)"; rm -rf "$scratch"; return 1; }
+	"$GH" pr create --repo "$repo" --head "$branch" --base "$base_branch" --title 'fix(ci): restore post-merge cascade (CAT-151)' --body "$(printf '%s\n\n%s\n\n%s' "$marker" 'Use a PAT identity for auto-merge so push CI and workflow_run deploys cascade.' 'Falls back to GITHUB_TOKEN with a warning when the secret is unavailable.')" >/dev/null || { echo "$repo: failed (pr create)"; rm -rf "$scratch"; return 1; }
 	echo "$repo: opened"; rm -rf "$scratch"
 }
 

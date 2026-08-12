@@ -32,6 +32,41 @@ echo broken >"$S/broken.yml"
 set +e; "$SUT" --patch-workflow "$S/broken.yml" >/dev/null; rc=$?; set -e
 [[ $rc -eq 3 ]] || exit 1
 
+# An unrelated job that merely PRINTS the PAT binding and the warning must not
+# certify a workflow whose merge step still runs on GITHUB_TOKEN. A file-wide
+# already-current test reported success here and left the repo broken forever.
+cat >"$S/masquerade.yml" <<'EOF'
+jobs:
+  docs:
+    steps:
+      - run: |
+          echo "AUTOMERGE_PAT: ${{ secrets.FLEET_PAT }}"
+          echo "::warning title=Auto-merge cascade suppressed::documented here"
+  auto-merge:
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "$PR_URL" --auto --squash
+EOF
+"$SUT" --patch-workflow "$S/masquerade.yml" --secret-name FLEET_PAT | grep -q patched || exit 1
+grep -qF 'AUTOMERGE_PAT: ${{ secrets.FLEET_PAT }}' "$S/masquerade.yml" || exit 1
+
+# The write must fail CLOSED: a rename that cannot happen may never report
+# 'patched'. Without the guard this printed success, exited 0 and changed nothing.
+mkdir -p "$S/ro"
+cp "$S/workflow.yml" "$S/ro/target.yml"
+sed -i.bak 's/secrets.FLEET_PAT/secrets.GITHUB_TOKEN/g' "$S/ro/target.yml" && rm -f "$S/ro/target.yml.bak"
+cp "$S/ro/target.yml" "$S/ro-expected.yml"
+chmod a-w "$S/ro"
+set +e
+out="$("$SUT" --patch-workflow "$S/ro/target.yml" --secret-name FLEET_PAT 2>/dev/null)"; rc=$?
+set -e
+chmod u+w "$S/ro"
+[[ "$out" != patched ]] || { echo 'FAIL: reported patched despite an impossible write'; exit 1; }
+[[ $rc -ne 0 ]] || { echo 'FAIL: exited 0 despite an impossible write'; exit 1; }
+cmp -s "$S/ro/target.yml" "$S/ro-expected.yml" || { echo 'FAIL: target changed unexpectedly'; exit 1; }
+
 # A prose comment mentioning the command is ignored; the real merge step is patched.
 cat >"$S/comment.yml" <<'EOF'
 # This workflow uses gh pr merge --auto after its policy gate.
@@ -141,4 +176,4 @@ EOF
 "$SUT" --patch-workflow "$S/canonical-old.yml" >/dev/null || exit 1
 sed 's/{{SECRET_NAME}}/AUTOMERGE_PAT/g' "$ROOT/plugins/dev/templates/github-actions/auto-merge.yml.template" >"$S/rendered.yml"
 cmp -s "$S/canonical-old.yml" "$S/rendered.yml" || exit 1
-echo '16 passed, 0 failed'
+echo '18 passed, 0 failed'
