@@ -3659,9 +3659,9 @@ const nodeClassOf = (over = {}) => ({
 
 // passingSkillsDirCheck — the `skillsDirCheck` seam installChecksForClass exposes, stubbed healthy.
 // The real check probes the live ~/.claude tree, and for class=worker a missing symlink is a hard
-// FAIL (developer/monitor only WARN). Any test that asserts on runDoctor's aggregate FAIL COUNT for
-// a worker must inject this, or it grades the host it happens to run on instead of the code under
-// test — which is exactly how it went red in CI. checkSkillsDirPlugins keeps its own direct coverage.
+// FAIL (developer/monitor only WARN). Every call that configures seams must inject this, or it grades
+// the host it happens to run on instead of the code under test — which is exactly how it went red in
+// CI. The CAT-154 seam guard below enforces that rule; checkSkillsDirPlugins keeps direct coverage.
 const passingSkillsDirCheck = () => [{ name: "skills-dir-plugins", status: "pass", detail: "stubbed" }];
 
 describe("checkNodeClass (CTL-1355)", () => {
@@ -4906,12 +4906,16 @@ describe("checksForClass wires the PR4 install-correctness checks into every arm
 
 describe("installChecksForClass — the focused post-install verification (CTL-1369 PR4)", () => {
   it("unrecognized class → single node-class check", () => {
-    const fns = installChecksForClass(nodeClassOf({ recognized: false, raw: "developr", class: "monitor" }));
+    const fns = installChecksForClass(nodeClassOf({ recognized: false, raw: "developr", class: "monitor" }), {
+      skillsDirCheck: passingSkillsDirCheck, // CAT-272: injected unconditionally — no site relies on the live default
+    });
     expect(fns).toHaveLength(1);
   });
 
   it("grades node-class + agents + pull-owner, and OMITS the network/operational checks", () => {
-    const s = installChecksForClass(nodeClassOf({ class: "worker", raw: "worker" })).map((f) => f.toString()).join("\n");
+    const s = installChecksForClass(nodeClassOf({ class: "worker", raw: "worker" }), {
+      skillsDirCheck: passingSkillsDirCheck, // CAT-272: injected unconditionally — no site relies on the live default
+    }).map((f) => f.toString()).join("\n");
     expect(s).toContain("checkNodeClass");
     expect(s).toContain("checkAgentsForClass");
     expect(s).toContain("checkPluginPullOwner");
@@ -4929,6 +4933,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: false,
       pluginPullOwner: "broker", // a worker w/ broker is fine; the FAIL here is the missing stack agent
+      skillsDirCheck: passingSkillsDirCheck, // CAT-154: was executing the real ~/.claude probe + `git rev-parse`
     });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     const agents = results.find((c) => c.name === "agents-for-class");
@@ -4968,6 +4973,7 @@ describe("installChecksForClass — the focused post-install verification (CTL-1
       hasStackAgent: false,
       hasUpdaterAgent: true,
       pluginPullOwner: "updater",
+      skillsDirCheck: passingSkillsDirCheck,
       log: () => {},
     });
     expect(code).toBe(0);
@@ -5061,7 +5067,12 @@ describe("strict node-class — install profile requires an explicitly persisted
   it("installChecksForClass FAILs an inferred/unpersisted class even when agents + owner look correct", async () => {
     // a worker-shaped node (stack agent present, owner broker) but catalyst.node.class never persisted →
     // the post-install verifier must FAIL (the class write did not take), not exit 0.
-    const fns = installChecksForClass(inferred, { hasStackAgent: true, hasUpdaterAgent: false, pluginPullOwner: "broker" });
+    const fns = installChecksForClass(inferred, {
+      hasStackAgent: true,
+      hasUpdaterAgent: false,
+      pluginPullOwner: "broker",
+      skillsDirCheck: passingSkillsDirCheck, // CAT-154: keep this assertion independent of the host tree
+    });
     const results = (await Promise.all(fns.map((f) => Promise.resolve().then(f)))).flat();
     expect(results.find((c) => c.name === "node-class").status).toBe(STATUS.FAIL);
   });

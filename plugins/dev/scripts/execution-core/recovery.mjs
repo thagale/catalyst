@@ -99,6 +99,7 @@ import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 // supersede-guard below.
 import { RECOVERY_PASS_PHASE } from "./recovery-reasoning.mjs";
 import { classifyEventStream } from "../lib/event-stream-class.mjs"; // CTL-1488: coordination/telemetry split
+import { ASSERTED_BY } from "./assertion-evidence.mjs"; // CTL-1789: terminal-writer attribution
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -411,7 +412,9 @@ export function reconstructWorkerState(orchDir, { statJob = defaultStatJob } = {
 // PURE given the injected statJob / probes / emitComplete / appendEvent — no
 // fs / spawn of its own.
 
-function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
+// CTL-1789: exported so the argv contract (notably --asserted-by) is pinnable
+// without shelling out to the real wrapper. The `{ spawn }` seam already existed.
+export function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
   const args = [
     "--phase",
     signal.phase,
@@ -423,6 +426,11 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
     orchDir,
     "--orch-id",
     signal.raw?.orchestrator ?? signal.ticket,
+    // CTL-1789: this complete is INFERRED from a work-done probe — the worker
+    // died without declaring anything. Mark the terminal fabricated so the
+    // advancement audit does not read it as the agent's own claim.
+    "--asserted-by",
+    ASSERTED_BY.RECOVERY_RECLAIM,
   ];
   const sessionId = signal.raw?.catalystSessionId;
   if (sessionId) {
@@ -634,8 +642,27 @@ export function defaultAppendFenceSuppressedEvent({
   });
 }
 
+export const DEFAULT_FENCE_SUPPRESSED_EMIT_WINDOW_MS = 15 * 60_000;
+
+function fenceSuppressedEmitWindowMs() {
+  const configured = Number(process.env.CATALYST_FENCE_SUPPRESSED_EMIT_WINDOW_MS);
+  return Number.isFinite(configured) && configured >= 0
+    ? configured
+    : DEFAULT_FENCE_SUPPRESSED_EMIT_WINDOW_MS;
+}
+
+function inFenceSuppressedEmitWindow(markerPath, now, windowMs = fenceSuppressedEmitWindowMs()) {
+  try {
+    const emittedAt = Number(JSON.parse(readFileSync(markerPath, "utf8"))?.emittedAt);
+    return Number.isFinite(emittedAt) && now - emittedAt < windowMs;
+  } catch {
+    return false;
+  }
+}
+
 // Keep observability-only markers outside workers/: an empty workers/<ticket>
 // directory is interpreted as started work until the orphan grace expires.
+// Markers are windowed so a resolved suppression can be observed if it recurs.
 export function emitFenceSuppressedEventOnce(
   orchDir,
   ticket,
@@ -644,7 +671,9 @@ export function emitFenceSuppressedEventOnce(
   appendFenceSuppressedEvent = defaultAppendFenceSuppressedEvent
 ) {
   const marker = join(orchDir, ".fence-suppressed-emits", `${ticket}-${site}.applied`);
-  if (existsSync(marker) || typeof appendFenceSuppressedEvent !== "function") return;
+  if (typeof appendFenceSuppressedEvent !== "function") return;
+  const now = Date.now();
+  if (inFenceSuppressedEmitWindow(marker, now)) return;
   const ok = appendFenceSuppressedEvent({
     ticket,
     site,
@@ -653,8 +682,29 @@ export function emitFenceSuppressedEventOnce(
   });
   if (ok !== false) {
     mkdirSync(dirname(marker), { recursive: true });
-    writeFileSync(marker, "");
+    writeFileSync(marker, JSON.stringify({ ticket, site, emittedAt: now }));
   }
+}
+
+export function gcFenceSuppressedEmits(
+  orchDir,
+  now,
+  windowMs = fenceSuppressedEmitWindowMs()
+) {
+  const dir = join(orchDir, ".fence-suppressed-emits");
+  let reaped = 0;
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".applied")) continue;
+      const marker = join(dir, entry.name);
+      if (inFenceSuppressedEmitWindow(marker, now, windowMs)) continue;
+      rmSync(marker, { force: true });
+      reaped += 1;
+    }
+  } catch {
+    return reaped;
+  }
+  return reaped;
 }
 
 // ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────
@@ -1008,6 +1058,21 @@ export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
   );
 }
 
+export function defaultAppendDispatchSkippedEvent({ ticket, orchId, descriptor }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase: "scheduler", ticket, orchId, action: "dispatch-skipped",
+    reason: descriptor?.reason ?? "unknown",
+    payloadExtras: descriptor ?? {},
+  }), "dispatch-skipped");
+}
+
+export function defaultAppendStalledRepullEvent({ ticket, orchId, mode, outcome, reason }) {
+  return appendEnvelopeBestEffort(buildEventEnvelope({
+    phase: "scheduler", ticket, orchId, action: "stalled-repull", reason,
+    payloadExtras: { mode, outcome },
+  }), "stalled-repull");
+}
+
 // CTL-932: `extras` rides into the payload so an escalation can carry evidence
 // (the wedged-never-started cap escalation embeds the screen captures from all
 // attempts). Absent for every pre-existing caller — shape unchanged.
@@ -1079,6 +1144,12 @@ export function defaultAppendDispatchFailedEvent({
   stderr_tail,
   spawn_error,
   signal,
+  // CAT-55: this emitter destructures an EXPLICIT key set, so any payload key a
+  // caller passes but this signature omits is silently dropped. The prior-artifact
+  // refusal's artifact_dir / searched_path are exactly what an operator asking
+  // "which document was missing?" needs off the event log, so they are named here.
+  artifact_dir,
+  searched_path,
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -1095,6 +1166,8 @@ export function defaultAppendDispatchFailedEvent({
         ...(stderr_tail !== undefined && stderr_tail !== "" && { stderr_tail }),
         ...(spawn_error !== undefined && spawn_error !== "" && { spawn_error }),
         ...(signal !== undefined && signal !== null && signal !== "" && { signal }),
+        ...(artifact_dir !== undefined && artifact_dir !== "" && { artifact_dir }),
+        ...(searched_path !== undefined && searched_path !== "" && { searched_path }),
       },
     }),
     "dispatch-failed"
@@ -1306,6 +1379,69 @@ export function defaultAppendPhaseAdvanceHeldEvent({ orchId, ticket, reason, blo
       payloadExtras: { blockers: blockers ?? [] },
     }),
     "advance-held"
+  );
+}
+
+// CTL-1789: the POSITIVE half of the advancement gate —
+// phase.advance.applied.<ticket>.
+//
+// Until this event existed the gate emitted ONLY on refusal (phase.advance.held),
+// so a month of logs could say why the FSM declined 307 times and nothing at all
+// about the advances it actually performed. "The pipeline advanced" was
+// unobservable; every consumer had to infer it from the SUCCESSOR phase's
+// dispatch, which conflates a fresh advance with a revive, a resume, and a
+// new-work pull.
+//
+// Emitted from exactly one place — the scheduler's advancement sweep, inside the
+// `dv.ok` branch, i.e. AFTER dispatchAndVerify has confirmed a live successor
+// worker. One event per successful advance (~9 per ticket), never per tick.
+//
+// `evidence` is the CTL-1789 second half: three-valued
+// (declared|fabricated|absent) attribution of the `from` phase's terminal — see
+// assertion-evidence.mjs. Promoted to an ATTRIBUTE (not just body.payload)
+// because otel-forward strips body.payload off-machine; `from`/`to` ride along
+// as attributes for the same reason (both bounded ≤10-value enums, so no Loki
+// cardinality risk). `evidence_reason` and `asserted_by` stay in the payload —
+// diagnostics, not dashboard dimensions.
+//
+// INFO severity, deliberately: `held` is a WARN because a refusal may need an
+// operator; a performed advance is the system working.
+//
+// Best-effort, never throws (appendEnvelopeBestEffort). The scheduler additionally
+// wraps the call in safeEmit — an audit emit must never abort a tick.
+export function defaultAppendPhaseAdvanceAppliedEvent({
+  orchId,
+  ticket,
+  from,
+  to,
+  evidence,
+  evidenceReason = null,
+  assertedBy = null,
+  assertionRef = null,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "applied",
+      severityText: "INFO",
+      severityNumber: 9,
+      payloadExtras: {
+        from: from ?? null,
+        to: to ?? null,
+        evidence,
+        evidence_reason: evidenceReason,
+        asserted_by: assertedBy,
+        assertion_ref: assertionRef,
+      },
+      attrExtras: {
+        "catalyst.advance.evidence": evidence,
+        "catalyst.advance.from": from ?? undefined,
+        "catalyst.advance.to": to ?? undefined,
+      },
+    }),
+    "advance-applied"
   );
 }
 

@@ -101,6 +101,19 @@ on:
       # confined to the teardown removal block would skip this workflow and the
       # ordering backstop couldn't catch a destroy-before-salvage regression.
       - "plugins/dev/skills/phase-teardown/**"
+      # CTL-56: the three merge-worktree guard tests scan skills and templates
+      # OUTSIDE plugins/dev/scripts/ for the --delete-branch invariant. A change
+      # confined to any of those files would otherwise skip this workflow.
+      - "plugins/dev/skills/phase-monitor-merge/**"
+      - "plugins/dev/skills/merge-pr/**"
+      - "plugins/dev/skills/recovery-pass/**"
+      - "plugins/dev/skills/triage-aging-prs/**"
+      - "plugins/dev/templates/**"
+      - "plugins/legacy/skills/oneshot/**"
+      # CTL-56: the repo-wide --delete-branch guard also scans the legacy orchestrate skill (this
+      # PR removes its live --delete-branch instructions); without this path a change confined to
+      # it would neither trigger the workflow on push nor mark a PR relevant, bypassing the guard.
+      - "plugins/legacy/skills/orchestrate/**"
       # CTL-1628: the root bun workspace lockfile/manifest — a change here affects
       # every member package's install (incl. execution-core, broker, otel-forward).
       - "package.json"
@@ -145,6 +158,15 @@ jobs:
               - "package.json"
               - "bun.lock"
               - "turbo.json"
+              - "plugins/dev/skills/phase-monitor-merge/**"
+              - "plugins/dev/skills/merge-pr/**"
+              - "plugins/dev/skills/recovery-pass/**"
+              - "plugins/dev/skills/triage-aging-prs/**"
+              - "plugins/dev/templates/**"
+              - "plugins/legacy/skills/oneshot/**"
+              # CTL-56: mirror the push-path entry above — the repo-wide guard scans the legacy
+              # orchestrate skill, so a change confined to it must mark the PR relevant.
+              - "plugins/legacy/skills/orchestrate/**"
 
   execution-core-unit-tests:
     needs: detect-changes
@@ -376,6 +398,16 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash lib/__tests__/linear-app-actor.test.sh
 
+      - name: portable stat helper tests (CAT-85)
+        working-directory: plugins/dev/scripts
+        run: bash lib/__tests__/portable-stat.test.sh
+
+      - name: portable stat regression guard (CAT-85)
+        working-directory: plugins/dev/scripts
+        run: |
+          command -v rg >/dev/null 2>&1 || (sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ripgrep)
+          bash lib/__tests__/stat-portability-guard.test.sh
+
       - name: worktree-salvage primitive + telemetry unit tests (CTL-1639)
         # lib/worktree-salvage.sh snapshots a worktree's unpushed commits +
         # uncommitted changes to ~/catalyst/salvage/ BEFORE any destructive
@@ -490,7 +522,7 @@ jobs:
         # CAT-167: plugin-refresh.test.mjs guards the only git reset --hard in
         # the codebase and the dirty-tree guard protecting uncommitted work.
         working-directory: plugins/dev/scripts/broker
-        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs
+        run: bun test worker-state-projection.test.mjs plugin-refresh.test.mjs event-leak-guard.test.mjs
 
       - name: otel-forward tests (CTL-1529 round 3)
         # otel-forward had NO CI coverage at all before this
@@ -581,7 +613,49 @@ jobs:
         working-directory: plugins/dev/scripts
         run: bash __tests__/draft-pr-lib.test.sh
 
+      - name: catalyst-stack integration tests (CAT-264)
+        # CAT-264: this suite was red and absent from the explicit CI allowlist.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/catalyst-stack.test.sh
+
+      - name: execution-core CLI routing tests (CAT-264)
+        # CAT-264: guards complete JSON output as well as noun dispatch.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/execution-core-cli-routing.test.sh
+
+      - name: phase-monitor-merge worktree-safe merge guard (CTL-56)
+        # Guards that phase-monitor-merge/SKILL.md uses gh pr merge --squash without
+        # --delete-branch (worktree-safe) and includes a checkout-free remote-ref delete.
+        # Previously ran only via the local run-tests.sh aggregate; pinned here so a
+        # reintroduction of --delete-branch in the headless merge skill fails CI.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/phase-monitor-merge-guard.test.sh
+
+      - name: oneshot worktree-safe merge guard (CTL-56)
+        # Guards that plugins/legacy/skills/oneshot/SKILL.md uses worktree-safe merge
+        # (no --delete-branch; checkout-free remote-ref delete after REST confirm).
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/oneshot-merge-worktree-guard.test.sh
+
+      - name: cross-site worktree-safe merge guard — model-invoked skills and templates (CTL-56)
+        # Guards that merge-pr, recovery-pass, triage-aging-prs, followup-prompt, and
+        # fixup-prompt all use worktree-safe merge (no --delete-branch; checkout-free
+        # remote-ref delete). File list is an array in the test; a 6th call site is a
+        # one-line add.
+        working-directory: plugins/dev/scripts
+        run: bash __tests__/merge-delete-branch-worktree-guard.test.sh
+
       - name: Run stable unit tests
+        # CTL-1789 round-1 P2 (Codex): assertion-evidence.test.mjs and
+        # assertion-evidence-parity.test.mjs are added below. The parity
+        # suite is the ONLY mechanism keeping the two hand-written bash
+        # mirrors of ASSERTED_BY (phase-agent-emit-complete's --asserted-by
+        # default, orchestrate-revive's flag) byte-identical to the JS
+        # registry — and a parity check that never runs enforces nothing, so
+        # omitting it here would reproduce the exact gap it was written to
+        # close. Both are pure, hermetic, sub-millisecond file reads: no
+        # timers, no fs.watch, no sandbox dependency, so neither can flake.
+        #
         # CTL-1678 round-7 (Codex): the four drain suites added below
         # (__tests__/config-drain-disabled, __tests__/doctor-drain-disabled,
         # cli/drain, drain-event) had NO required-CI coverage, so every regression
@@ -642,7 +716,10 @@ jobs:
             cli/beliefs-shadow-status.test.mjs \
             beliefs/shadow-store.test.mjs \
             beliefs/why.test.mjs \
+            cli/branches.test.mjs \
             abort-worker.test.mjs \
+            assertion-evidence.test.mjs \
+            assertion-evidence-parity.test.mjs \
             autotune-decision.test.mjs \
             autotune-lifecycle.test.mjs \
             autotune-writeback.test.mjs \
@@ -659,6 +736,7 @@ jobs:
             stall-janitor-throttle.test.mjs \
             phantom-worker-dir.test.mjs \
             in-flight-supersede.test.mjs \
+            phase-signal-order.test.mjs \
             boot-resume-approval.test.mjs \
             boot-resume.test.mjs \
             claim.test.mjs \
@@ -706,6 +784,9 @@ jobs:
             event-tail.test.mjs \
             event-log-window.test.mjs \
             event-log-read-guard.test.mjs \
+            env-restore-guard.test.mjs \
+            gh-state-ignore-guard.test.mjs \
+            install-seam-guard.test.mjs \
             fence-guard.test.mjs \
             fence-standoff.test.mjs \
             fence-guard-integration.test.mjs \

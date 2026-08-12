@@ -5,7 +5,7 @@ description: |
   Phase 3). Lifts the active listen loop from the legacy `oneshot` Phase 5
   body: event-driven wait on `catalyst-events wait-for`, inline resolution of
   CI fix-ups, bot review threads, and BEHIND rebases, then `gh pr merge
-  --squash --delete-branch` when the PR reaches CLEAN. Linear Done transition
+  --squash` (worktree-safe, CTL-56) when the PR reaches CLEAN. Linear Done transition
   and worktree teardown are owned by phase-teardown (CTL-703). Dispatched as
   a `claude --bg` job by `phase-agent-dispatch`, which invokes it via slash
   command — hence `user-invocable: true`.
@@ -93,9 +93,13 @@ REPO=$(jq -r '.pr.url // empty' "$PR_SIGNAL" 2>/dev/null | sed -E 's#^https://gi
 MERGE_PERMISSION_LIB="${PLUGIN_ROOT}/scripts/lib/escalate-merge-permission.sh"
 if [[ -r "$MERGE_PERMISSION_LIB" ]]; then
   source "$MERGE_PERMISSION_LIB"
-  MERGE_PERMISSION="$(merge_permission_probe "$REPO")"
+  COMMS="${COMMS:-${PLUGIN_ROOT}/scripts/catalyst-comms}"
+  [[ -x "$COMMS" ]] || COMMS="$(command -v catalyst-comms 2>/dev/null || true)"
+  MERGE_PERMISSION_DESC="$(merge_permission_describe "$REPO")"
+  MERGE_PERMISSION="${MERGE_PERMISSION_DESC%% *}"
+  MERGE_PERMISSION_GRANT="${MERGE_PERMISSION_DESC##* }"
   if [[ "$MERGE_PERMISSION" == "denied" ]]; then
-    _escalate_merge_permission "$REPO" "$PR_NUMBER" "READ"
+    _escalate_merge_permission "$REPO" "$PR_NUMBER" "$MERGE_PERMISSION_GRANT"
     exit 1
   fi
 fi
@@ -443,12 +447,29 @@ fi
 # actually opened on, resolved above from phase-pr.json's .pr.url).
 # CAT-222: wrapped so a permission-wall denial escalates instead of surfacing
 # as an opaque non-zero exit.
+# CAT-257: this bash block is independent from preflight, so source locally.
+MERGE_PERM_LIB_OK=false
+MERGE_PERMISSION_LIB="${PLUGIN_ROOT}/scripts/lib/escalate-merge-permission.sh"
+if [[ -r "$MERGE_PERMISSION_LIB" ]]; then
+  source "$MERGE_PERMISSION_LIB" && MERGE_PERM_LIB_OK=true
+fi
+[[ "$MERGE_PERM_LIB_OK" == true ]] || echo "phase-monitor-merge: ${MERGE_PERMISSION_LIB} not readable; merge-permission classification DISABLED (a permission wall will be reported as an unclassified merge failure)" >&2
+COMMS="${COMMS:-${PLUGIN_ROOT}/scripts/catalyst-comms}"
+[[ -x "$COMMS" ]] || COMMS="$(command -v catalyst-comms 2>/dev/null || true)"
+# CTL-56: capture head ref BEFORE merge so we can delete it checkout-free after confirm.
+HEAD_REF=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref' 2>/dev/null || true)
 MERGE_ERR_FILE="$(mktemp)"
-if ! gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash --delete-branch 2>"$MERGE_ERR_FILE"; then
+# CTL-56: deliberately no local branch-cleanup flag on this call — it triggers a
+# local `git checkout <base>` that fails inside a linked worktree when the base
+# branch is already checked out in the primary clone, and it auto-closes any
+# OTHER open PR sharing this head branch name (breaks the dual-PR courtesy-PR
+# policy). Branch cleanup happens below, checkout-free, via the REST ref-delete
+# after the merge is confirmed.
+if ! gh pr merge "$PR_NUMBER" --repo "${REPO}" --squash 2>"$MERGE_ERR_FILE"; then
   MERGE_ERR="$(cat "$MERGE_ERR_FILE" 2>/dev/null || true)"
   rm -f "$MERGE_ERR_FILE"
-  if merge_denial_is_permission "$MERGE_ERR"; then
-    _escalate_merge_permission "$REPO" "$PR_NUMBER"
+  if [[ "$MERGE_PERM_LIB_OK" == true ]] && merge_denial_is_permission "$MERGE_ERR"; then
+    _escalate_merge_permission "$REPO" "$PR_NUMBER" "${MERGE_PERMISSION_GRANT:-UNKNOWN}"
     exit 1
   fi
   echo "phase-monitor-merge: gh pr merge exited non-zero: ${MERGE_ERR}" >&2
@@ -457,7 +478,17 @@ else
 fi
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
-[[ "$MERGED_OK" = "true" ]] || { echo "phase-monitor-merge: merge not confirmed via REST" >&2; exit 1; }
+if [[ "$MERGED_OK" != "true" ]]; then
+  echo "phase-monitor-merge: merge not confirmed via REST${MERGE_ERR:+ — last merge error: ${MERGE_ERR}}" >&2
+  if [[ "$MERGE_PERM_LIB_OK" == true ]]; then
+    escalation_emit_terminal monitor-merge "$PHASE" "$TICKET" merge_failed_unclassified
+  elif [[ -x "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" ]]; then
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" --phase "$PHASE" --ticket "$TICKET" --status failed --reason merge_failed_unclassified
+  else
+    echo "phase-monitor-merge: phase-agent-emit-complete unavailable; NO terminal event for ${TICKET}/${PHASE}" >&2
+  fi
+  exit 1
+fi
 
 # CTL-1680: retry empty merge_commit_sha — GitHub can return it empty for a few
 # seconds after a squash merge while it computes the SHA. Bounded + sleeps (no
@@ -487,6 +518,17 @@ jq --arg ts "$MERGED_AT" --arg sha "${MERGE_COMMIT_SHA:-}" \
     | (if $sha != "" then .pr.mergeCommitSha = $sha else . end)
     | .updatedAt = $ts' \
    "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+
+# CTL-56: delete the remote head ref checkout-free, AFTER merge is REST-confirmed and SHA
+# recorded. Idempotent + best-effort: a 404/422 means the ref is already gone or protected;
+# never fail the phase on branch cleanup — the merge already landed.
+if [[ -n "${HEAD_REF:-}" ]]; then
+  # CTL-56: URL-encode the head ref (preserve '/') so a metacharacter like '#' in a branch name
+  # (e.g. feature#123) can't truncate the endpoint into deleting the wrong ref.
+  enc_ref=$(printf '%s' "$HEAD_REF" | jq -sRr @uri | sed 's|%2F|/|g')
+  gh api --method DELETE "repos/${REPO}/git/refs/heads/${enc_ref}" >/dev/null 2>&1 \
+    || echo "CTL-56: remote branch ${HEAD_REF} delete skipped (already gone or protected)" >&2
+fi
 
 # CTL-703: Linear Done is written by phase-teardown (10th phase), not here.
 echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}"

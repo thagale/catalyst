@@ -2253,16 +2253,35 @@ export function checkReaper(deps = {}) {
 // The stack keep-alive must be both installed and migrated to the supervised
 // invocation. Keep all host I/O outside checkStackAgent: its three required
 // seams make an incomplete unit fixture fail loudly instead of probing launchd.
+//
+// CAT-264: doctor FAILs gate catalyst-join before install-services can repair
+// the host. Scope the absent-plist FAIL to strict Darwin checks; non-Darwin
+// hosts cannot run launchd, and preinstall runs are followed by a strict verify.
+// An installed-but-unloaded agent remains FAIL even during preinstall because
+// that is the CAT-239 silent-unload state this probe exists to catch.
 export function checkStackAgent(deps = {}) {
   for (const seam of ["readPlist", "runLaunchctl", "readHaltMarker"]) {
     if (typeof deps[seam] !== "function") throw new TypeError(`checkStackAgent requires ${seam}`);
   }
-  const { readPlist, runLaunchctl, readHaltMarker, nowMs = () => Date.now() } = deps;
+  const {
+    readPlist,
+    runLaunchctl,
+    readHaltMarker,
+    nowMs = () => Date.now(),
+    platform = "darwin",
+    preinstall = false,
+  } = deps;
+  const sev = (s) => (preinstall && s === STATUS.FAIL ? STATUS.WARN : s);
   const checks = [];
+  if (platform !== "darwin") {
+    return [mkCheck("stack-agent", STATUS.WARN,
+      `launchd is macOS-only and this host is ${platform} — the catalyst-stack keep-alive ` +
+      "cannot supervise it; 'catalyst-stack install-services' is macOS-only, so this is not remediable here")];
+  }
   let xml;
   try { xml = readPlist(); } catch { xml = null; }
   if (!xml) {
-    return [mkCheck("stack-agent", STATUS.FAIL,
+    return [mkCheck("stack-agent", sev(STATUS.FAIL),
       "catalyst-stack LaunchAgent is not installed — run 'catalyst-stack install-services'")];
   }
   let state;
@@ -2300,6 +2319,7 @@ function productionStackAgentDeps() {
   // doctor intentionally does not duplicate the marker filename literal.
   const haltLib = resolve(dirname(fileURLToPath(import.meta.url)), "../lib/stack-halt.sh");
   return {
+    platform: process.platform,
     readPlist: () => readFileSync(plistPath, "utf8"),
     runLaunchctl: () => {
       const r = spawnSync("launchctl", ["list", "ai.coalesce.catalyst-stack"], { encoding: "utf8", timeout: 5_000 });
@@ -3196,11 +3216,100 @@ function defaultReadIssueRowCount(path) {
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
+// defaultProbeTokenPresence — CAT-73. Answers "can the SUPERVISED writer authenticate?",
+// not "does this shell happen to hold the token". `catalyst doctor` sources neither
+// ~/.config/catalyst/cluster.env nor ~/.config/catalyst/cloud-sync.env, but cloud-sync's
+// launch.sh sources both — so process.env is the wrong authority and produces both false
+// greens and false warns. Delegates to the launchd-faithful presence probe
+// (lib/cloud-sync-token-probe.sh), which scrubs the caller's CATALYST_*/XDG_CONFIG_HOME
+// overrides, sources the same two 0600 files in the same order, resolves the token NAME
+// through the same resolveNodeCloudTokenEnv ladder, and reports presence by NAME only —
+// the VALUE never crosses this boundary. Returns { available:false, reason } on ANY
+// failure so the caller degrades LOUDLY rather than silently falling back to process.env
+// (the CAT-154 learning: an omitted seam must not quietly answer from live host I/O).
+function defaultProbeTokenPresence({ hostName = process.env.CATALYST_HOST_NAME ?? "" } = {}) {
+  const probePath = resolve(dirname(fileURLToPath(import.meta.url)), "../lib/cloud-sync-token-probe.sh");
+  if (!existsSync(probePath)) return { available: false, reason: "probe script not found" };
+  let r;
+  try {
+    r = spawnSync("bash", ["-c", '. "$0"; cloud_sync_probe_token --host "$1"', probePath, hostName], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+  } catch (e) {
+    return { available: false, reason: `probe spawn failed: ${e?.code ?? "error"}` };
+  }
+  // NOTE: `reason` lands in doctor's output, so it never carries probe stdout/stderr —
+  // the probe is value-safe by construction, but this boundary does not rely on that.
+  if (r.error) return { available: false, reason: r.error.code === "ETIMEDOUT" ? "probe timed out" : "probe could not run" };
+  if (r.status !== 0) return { available: false, reason: `probe exit ${r.status}` };
+  if (typeof r.stdout !== "string" || r.stdout.trim().length === 0) return { available: false, reason: "probe produced no output" };
+  const kv = new Map();
+  for (const line of r.stdout.split("\n")) {
+    const eq = line.indexOf("="); // indexOf, not split: a name containing "=" must not corrupt the map
+    if (eq <= 0) continue;
+    kv.set(line.slice(0, eq).trim(), line.slice(eq + 1).trim());
+  }
+  const name = kv.get("name");
+  const present = kv.get("present");
+  if (!name || (present !== "yes" && present !== "no")) return { available: false, reason: "probe output malformed" };
+  return {
+    available: true,
+    present: present === "yes",
+    name,
+    source: kv.get("source") || "unknown",
+    permsWarning: kv.get("perms_warning") === "yes",
+  };
+}
+
+// resolveReplicaTokenPresence — CAT-73. The four-state token verdict, pure so the state
+// machine is testable without doctor's surrounding I/O. Never returns FAIL (see the
+// checkCloudSync contract below) and never touches the token VALUE.
+export function resolveReplicaTokenPresence({ probe, shellTokenSet, tokenEnv }) {
+  if (probe?.available) {
+    const tokenName = probe.name || tokenEnv.envVar;
+    const perms = probe.permsWarning ? " — WARNING: the token file is not mode 600" : "";
+    // A NAME divergence is real information, but must not become a second record.
+    const divergence = tokenName !== tokenEnv.envVar ? ` (doctor resolved ${tokenEnv.envVar} from this shell's config)` : "";
+    if (probe.present === true) {
+      return {
+        tokenSet: true,
+        tokenName,
+        status: STATUS.PASS,
+        detail: `${tokenName} is set in the writer's environment (source=${probe.source})${perms}${divergence}`,
+      };
+    }
+    if (shellTokenSet) {
+      return {
+        tokenSet: false,
+        tokenName,
+        status: STATUS.WARN,
+        detail: `${tokenName} is set in this shell but NOT visible to the supervised writer — launchd sources only ~/.config/catalyst/cluster.env and ~/.config/catalyst/cloud-sync.env; write it to ~/.config/catalyst/cloud-sync.env (chmod 600)${divergence}`,
+      };
+    }
+    return {
+      tokenSet: false,
+      tokenName,
+      status: STATUS.WARN,
+      detail: `${tokenName} not set — the writer cannot authenticate (idle no-op); provision it in a 0600 file the launcher sources (~/.config/catalyst/cloud-sync.env)${divergence}`,
+    };
+  }
+  // Degraded: say so IN the record. Never silently answer from the wrong environment.
+  const tokenName = tokenEnv.envVar;
+  return {
+    tokenSet: shellTokenSet,
+    tokenName,
+    status: shellTokenSet ? STATUS.PASS : STATUS.WARN,
+    detail: `launchd-faithful token probe unavailable (${probe?.reason ?? "unknown"}) — answering from this shell's environment, which may not reflect the writer's view: ${tokenName} ${shellTokenSet ? "is set" : "not set"}`,
+  };
+}
+
 // checkCloudSync — CTL-1394. Advisory health of the per-node supervised Linear-replica
 // writer + its read tier. EVERY condition is WARN/INFO/PASS, NEVER FAIL: doctor's exit code
 // is the FAIL count and gates catalyst-join activation — a FAIL here would block a node that
 // simply hasn't opted into the replica yet. All deps injectable so tests touch no
-// fs/pgrep/launchctl. NODE-SAFE: file-mtime freshness only (no bun:sqlite); rowcount /
+// fs/pgrep/launchctl — and, since CAT-73, no subprocess either: the production default for
+// probeTokenPresence shells out to bash, so the suite must inject it. NODE-SAFE: file-mtime freshness only (no bun:sqlite); rowcount /
 // MAX(updated_at) freshness is check-setup.sh's richer job.
 export function checkCloudSync(deps = {}) {
   const {
@@ -3213,7 +3322,10 @@ export function checkCloudSync(deps = {}) {
     statFile = (p) => statSync(p),
     mode = readLinearReplica().mode,
     tokenEnv = resolveNodeCloudTokenEnv(),
+    // CAT-73: `env` is NO LONGER the token authority — probeTokenPresence is. It is read
+    // only on the degraded path (probe unavailable), where the record says so explicitly.
     env = process.env,
+    probeTokenPresence = defaultProbeTokenPresence,
     now = Date.now(),
     staleMs = Number(process.env.CATALYST_REPLICA_STALE_MS) || 120_000,
     // The writer-lock heartbeat is the FEED-INDEPENDENT liveness signal: the live writer
@@ -3325,14 +3437,21 @@ export function checkCloudSync(deps = {}) {
     }
   }
 
-  // (c) token presence — by NAME only, NEVER the value.
-  const tokenVal = env[tokenEnv.envVar];
-  const tokenSet = typeof tokenVal === "string" && tokenVal.length > 0;
-  checks.push(
-    tokenSet
-      ? mkCheck("replica-token", STATUS.PASS, `${tokenEnv.envVar} is set (len>0, source=${tokenEnv.source})`)
-      : mkCheck("replica-token", STATUS.WARN, `${tokenEnv.envVar} not set — the writer cannot authenticate (idle no-op); provision it in a 0600 file the launcher sources`),
-  );
+  // (c) token presence — by NAME only, NEVER the value. CAT-73: the authority is the
+  // environment the SUPERVISED WRITER sees (launchd + the two 0600 files launch.sh
+  // sources), not this shell's — catalyst-doctor sources neither file.
+  let probe;
+  try {
+    probe = probeTokenPresence();
+  } catch (e) {
+    // A probe exception must never propagate into doctor's run.
+    probe = { available: false, reason: String(e?.message ?? e) };
+  }
+  const shellTokenVal = env[tokenEnv.envVar];
+  const shellTokenSet = typeof shellTokenVal === "string" && shellTokenVal.length > 0;
+  const { tokenSet, tokenName, status: tokenStatus, detail: tokenDetail } =
+    resolveReplicaTokenPresence({ probe, shellTokenSet, tokenEnv });
+  checks.push(mkCheck("replica-token", tokenStatus, tokenDetail));
 
   // (d) read-flag ↔ writer consistency.
   if (mode === "on") {
@@ -3351,10 +3470,10 @@ export function checkCloudSync(deps = {}) {
   const flagOff = mode !== "on";
   if (tokenMissing && flagOff) {
     checks.push(mkCheck("replica-tier", STATUS.WARN,
-      `replica tier INERT end-to-end: token ${tokenEnv.envVar} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
+      `replica tier INERT end-to-end: token ${tokenName} unset AND CATALYST_LINEAR_REPLICA off. Both must be fixed, token FIRST`));
   } else if (tokenMissing || flagOff) {
     checks.push(mkCheck("replica-tier", STATUS.WARN,
-      `replica tier partially configured (${tokenMissing ? `token ${tokenEnv.envVar} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
+      `replica tier partially configured (${tokenMissing ? `token ${tokenName} unset` : "CATALYST_LINEAR_REPLICA off"}) — reads still fall back`));
   } else {
     checks.push(mkCheck("replica-tier", STATUS.PASS, "replica tier fully configured (token set + read flag on)"));
   }
@@ -5475,7 +5594,7 @@ export function checksForClass(nc, opts = {}) {
       deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
       secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
-      () => checkStackAgent(productionStackAgentDeps()), // CAT-163: stale keep-alive plists undo deliberate stops
+      () => checkStackAgent({ ...productionStackAgentDeps(), preinstall }), // CAT-163: stale keep-alive plists undo deliberate stops
       () => checkConnectivity({ seed, otel, fetch: _fetch }),
       () => checkHrwPartition(), // would-own count (visibility)
       agentsThunk, // CTL-1369 PR4: updater agent installed, no worker stack (monitor is adopt-updater-shaped)
@@ -5504,7 +5623,7 @@ export function checksForClass(nc, opts = {}) {
     deploymentModeCheck, // CTL-1617: fleet-topology fact, graded for every class
       layer2PathDivergenceCheck, // CTL-1616 PR6 follow-up: split-brain Layer-2 layout FAILs until the sweep
     secretContractCheck, // CTL-1616 PR2: secret-contract shadow pass, INFO-only, graded for every class
-    () => checkStackAgent(productionStackAgentDeps()), // CAT-163: grade installation + --supervised migration
+    () => checkStackAgent({ ...productionStackAgentDeps(), preinstall }), // CAT-163: grade installation + --supervised migration
     () => checkHostIdentity(),
     () => checkHrwPartition(),
     () => checkPeerUniqueness(),

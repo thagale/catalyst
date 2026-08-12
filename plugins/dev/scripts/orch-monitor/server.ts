@@ -80,7 +80,7 @@ import {
   beliefCfg,
 } from "./lib/belief-store-queries.mjs";
 // CTL-1100: journey assembler (bun:sqlite-free — plain static import safe).
-import { assembleJourney } from "./lib/journey.mjs";
+import { assembleJourney, eventLogPathFor } from "./lib/journey.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -4277,6 +4277,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
             orchDir: wtDir,
             workersDir: `${wtDir}/workers`,
             dbPath: dbPath ?? undefined,
+            // CAT-216: keep request cost scoped to this server's catalyst root.
+            eventLogPath: eventLogPathFor(CATALYST_DIR),
           }));
         }
 
@@ -4429,6 +4431,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
             ticket,
             response,
             confirm: body.confirm,
+            force: body.force === true,
           });
           switch (result.status) {
             case "not_held":
@@ -4465,6 +4468,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
                 },
                 { status: 409 },
               );
+            case "artifact_missing":
+              return Response.json({ ...result, error: result.message }, { status: 409 });
             case "resuming":
               // Response recorded + marker cleared + resume event emitted; the UI
               // marks the row `resuming` and arms its optimistic-rollback timer.
