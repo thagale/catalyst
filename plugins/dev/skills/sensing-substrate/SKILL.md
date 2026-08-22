@@ -123,6 +123,7 @@ stream label:
 | `~/catalyst/execution-core/daemon.log` | `catalyst.execution-core` | pino-JSON |
 | `~/catalyst/otel-forward.log` | `catalyst.otel-forward` | pino-JSON |
 | `~/catalyst/monitor.log` | `catalyst.monitor` | **plain text**, unstructured, never dropped |
+| `~/catalyst/supply-chain.log` | `catalyst.supply-chain` | pino-JSON — one record per dependency install observed by `observed-install.sh` (CAT-299); not a daemon, so it is NOT part of the silence sweep |
 
 The dashboard's `$service` template var enumerates exactly these via `label_values(service_name)`
 regex-filtered to `^catalyst\.(broker|execution-core|monitor|otel-forward)$`.
@@ -240,6 +241,28 @@ should be 0 except `stale fence`** (noisy-normal on multi-host; always 0 on sing
 ```
 
 ---
+
+### Supply-chain signal (CAT-299 / dispensa ADR-0014 §8)
+
+`observed-install.sh` wraps a dependency install and records every remote TCP endpoint the
+install's process tree opened, classified against a forward-resolved registry/CDN allowlist.
+An `unexpected_count > 0` record is the fleet's detection signal for a postinstall that phones
+home (the s1ngularity / Shai-Hulud / keyv-cacheable shape). A non-zero hit is **T3 — ask first**:
+pause auto-merge (`dispensa/tools/automerge_kill_switch.py pause`) and start
+`dispensa/docs/runbooks/credential-rotation.md` §2 (contain) before anything else.
+
+**(h) Installs with an unexpected endpoint, per node × repo, last 24h:**
+```logql
+sum by (catalyst_node_name, repo) (count_over_time({service_name=`catalyst.supply-chain`} | json | unexpected_count > 0 [24h]))
+```
+**(i) Show the offending endpoints (last 24h):**
+```logql
+{service_name=`catalyst.supply-chain`} | json | unexpected_count > 0 | line_format `{{.repo}} {{.cmd}} exit={{.exit}} unexpected={{.unexpected_count}} {{.endpoints}}`
+```
+**(j) Install failures (exit != 0) — the strictDepBuilds "a dependency grew an install hook" case surfaces here too:**
+```logql
+{service_name=`catalyst.supply-chain`} | json | exit != 0
+```
 
 ## 4. Silence detector — "no logs from monitor/broker in last N min"
 
