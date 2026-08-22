@@ -287,11 +287,14 @@ clean-pass result may arrive as a reaction or a plain comment rather than a stru
 object, so detect it via reactions/comments, not only the reviews API. A re-review after a fix
 push may need to be requested explicitly rather than firing automatically.
 
-**Code review convergence.** Rounds 1-5 (per reviewer) fix everything reasonable. Rounds 6-15 fix
-P1 inline, ticket new P2-or-lower. Rounds 16-25 ticket P1 too unless critical/blocking. Round 25 is
-a hard stop — escalate to a human. Run a local review pass before each push; check for a
-concurrent session working the same PR (broker_claim_pr) before starting a round. Full policy:
-docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md.
+**Code review convergence.** See the `review-comments`/`merge-pr`/
+`wait-for-github` skills (this repo's own orchestrator-integrated
+implementation — broker-aware collision detection via `broker_claim_pr`,
+unchanged by the credenza-hosted `resolve-review-feedback`/`land-pr`
+skills used elsewhere in the fleet). Canonical bot-reviewer-facing text:
+docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md — synced from
+credenza; edit the canonical copy in credenza's `resolve-review-feedback`
+skill reference docs instead of hand-editing this copy.
 
 ## Reference Docs
 
