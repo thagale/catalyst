@@ -293,9 +293,8 @@ implementation — broker-aware collision detection via `broker_claim_pr`,
 unchanged by the credenza-hosted `resolve-review-feedback`/`land-pr`
 skills used elsewhere in the fleet). Canonical bot-reviewer-facing text:
 docs/DECISIONS/2026-08-07-pr-review-convergence-policy.md — synced from
-credenza; edit
-`credenza/claude/skills/resolve-review-feedback/references/convergence-policy.md`
-instead of hand-editing this copy.
+credenza; edit the canonical copy in credenza's `resolve-review-feedback`
+skill reference docs instead of hand-editing this copy.
 
 ## Reference Docs
 
