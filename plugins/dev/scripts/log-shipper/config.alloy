@@ -240,6 +240,25 @@ loki.source.file "cloud_sync" {
 	tail_from_end = true
 }
 
+// ----- supply-chain.log (pino JSON) ------------------------------------------
+// CAT-299 / dispensa ADR-0014 §8: one line per observed dependency install,
+// written by plugins/dev/scripts/observed-install.sh -- the install command,
+// exit code, duration, every remote TCP endpoint the install's process tree
+// opened, and how many were NOT on the forward-resolved registry/CDN
+// allowlist (`unexpected_count`). This is the fleet's detection signal for the
+// s1ngularity / Shai-Hulud / keyv-cacheable attack shape (a postinstall that
+// phones home): query `{service_name="catalyst.supply-chain"} | json |
+// unexpected_count > 0`. Pre-created by launch.sh like the other fixed-path
+// streams so it is never dark on a host that has not installed anything yet.
+loki.source.file "supply_chain" {
+	targets = [{
+		__path__     = coalesce(sys.env("CATALYST_SUPPLY_CHAIN_LOG"), "/root/catalyst/supply-chain.log"),
+		service_name = "catalyst.supply-chain",
+	}]
+	forward_to    = [loki.process.pino.receiver]
+	tail_from_end = true
+}
+
 // pino-JSON processing, shared by the structured daemon logs.
 //   * stage.json              — lift level/time/name out of the JSON line (drives
 //                               severity + service mapping + the record timestamp)

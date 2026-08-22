@@ -94,6 +94,9 @@ export CATALYST_UPDATER_LOG="${CATALYST_UPDATER_LOG:-${CATALYST_DIR}/updater.log
 export CATALYST_CLOUD_SYNC_LOG="${CATALYST_CLOUD_SYNC_LOG:-${CATALYST_DIR}/cloud-sync.log}"
 # CTL-1509: the health-responder sweep log (7th stream — plain-line pipeline).
 export CATALYST_HEALTH_RESPONDER_LOG="${CATALYST_HEALTH_RESPONDER_LOG:-${CATALYST_DIR}/health-responder.log}"
+# CAT-299: observed-install.sh's supply-chain log (pino-JSON stream). Exported
+# even on hosts that never run an install — Alloy just tails an empty file.
+export CATALYST_SUPPLY_CHAIN_LOG="${CATALYST_SUPPLY_CHAIN_LOG:-${CATALYST_DIR}/supply-chain.log}"
 # CAT-161: the unified event log glob (8th stream — node.heartbeat lives here,
 # consumed by loki-liveness.mjs's CATALYST_LIVENESS_READ_SOURCE=loki path).
 # Monthly-rotating filename, so config.alloy discovers it via local.file_match
@@ -118,7 +121,7 @@ mkdir -p "$STORAGE"
 # stays a tails-nothing target, exactly as before.
 for _lf in "$CATALYST_BROKER_LOG" "$CATALYST_DAEMON_LOG" "$CATALYST_OTEL_FORWARD_LOG" \
   "$CATALYST_MONITOR_LOG" "$CATALYST_UPDATER_LOG" "$CATALYST_CLOUD_SYNC_LOG" \
-  "$CATALYST_HEALTH_RESPONDER_LOG"; do
+  "$CATALYST_HEALTH_RESPONDER_LOG" "$CATALYST_SUPPLY_CHAIN_LOG"; do
   [[ -e "$_lf" ]] && continue
   mkdir -p "$(dirname "$_lf")" 2>/dev/null || true
   touch "$_lf" 2>/dev/null || warn "cannot pre-create $_lf — that stream stays dark until the file exists at the next Alloy restart"

@@ -33,6 +33,7 @@ dies, its last lines are still on disk for Alloy to pick up.
 | `~/catalyst/execution-core/daemon.log` | `catalyst.execution-core` | pino JSON       |
 | `~/catalyst/otel-forward.log`          | `catalyst.otel-forward`   | pino JSON       |
 | `~/catalyst/monitor.log`               | `catalyst.monitor`        | mixed/plain text|
+| `~/catalyst/supply-chain.log`          | `catalyst.supply-chain`   | pino JSON (one line per observed dependency install, CAT-299) |
 
 `broker`, `execution-core`, and `otel-forward` emit pino JSON
 (`{level,time(ms),pid,hostname,name,msg,...}`). `monitor.log` is mixed `console.*`
@@ -143,6 +144,7 @@ defaults are never hit:
 | `CATALYST_DAEMON_LOG`      | execution-core daemon.log path       | `~/catalyst/execution-core/daemon.log` |
 | `CATALYST_OTEL_FORWARD_LOG`| otel-forward.log path                | `~/catalyst/otel-forward.log` |
 | `CATALYST_MONITOR_LOG`     | monitor.log path                     | `~/catalyst/monitor.log`      |
+| `CATALYST_SUPPLY_CHAIN_LOG`| supply-chain.log path (observed-install.sh) | `~/catalyst/supply-chain.log` |
 
 > The collector endpoint and Tailscale IP match the rest of the Catalyst telemetry
 > stack (`otel-forward`, the cost-cap Prometheus reader). The export is plain HTTP
